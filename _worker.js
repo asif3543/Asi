@@ -1,13 +1,13 @@
 /**
- * ASI Animes / AnimeBox - Cloudflare Worker Core Engine
- * SINGLE SITE + APK EDITION - PRO FULL VERSION
- * Features: Adsterra/Monetag, APK, ImgBB Permanent CDN, Strict Security, 
- * Zero Memory Leaks, Smart Caching, STRICT SHORTENER LOCK (No leaks).
+ * ASI Animes / AnimeBox - FINAL MERGED COMPLETE CODE
+ * Base: First code (1400 lines) SAME TO SAME - Ads + APK + Design preserved
+ * Changes: ImgBB DELETED, Telegram CDN as image source, Shortener = Second code robust logic
+ * KV: stores telegram_url + tg_file_id + /api/tg-img/ proxy - never fills
  */
 
 export default {
   async fetch(request, env, ctx) {
-    // 1. CORS Preflight - Fixes Admin Panel saving errors & GitHub deployment blocks
+    // 1. CORS Preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -54,32 +54,86 @@ export default {
       return adminPinHeader === actualPin;
     };
 
-    const sendTelegramNotification = async (settings, text, photoUrl = null) => {
-      if (!settings.bot_token || !settings.chat_id) {
-        return { ok: false, reason: "TG Not Setup" };
+    // Auto VIP clean
+    ctx.waitUntil((async () => {
+      if (env.ANIME_KV) {
+        let users = (await kvGet("premium_users", [])) || [];
+        const now = new Date();
+        const validUsers = users.filter(u => new Date(u.expires_at) > now);
+        if (users.length !== validUsers.length) {
+          await kvSet("premium_users", validUsers);
+        }
       }
+    })());
+
+    // Telegram sender - returns file_id + public_link
+    const sendTelegramPost = async (settings, postData, file = null) => {
+      const botToken = settings.bot_token || env.TELEGRAM_BOT_TOKEN;
+      const chatId = settings.chat_id || env.TELEGRAM_CHAT_ID;
+      if (!botToken || !chatId) return { ok: false, reason: "Bot Token/Chat ID not set" };
+
+      const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      let hash = (postData.genres || "").split(/[,.]+/).map(g=>g.trim()).filter(g=>g).map(g=>'#'+g.replace(/\s+/g,'')).join(' ');
+      const caption = `Name: <b>${esc(postData.name)}</b> ❞\n\nCategory:\n<b>${esc(postData.category)}</b> ❞\n\nGenre: ${esc(hash)}\nRelease: ${esc(postData.release || '-')}\n\n🔥 ╰┈➤ ♡𝘼𝙉𝙄𝙈𝙀 𝘽𝙔_𝘼𝙎𝙄✨\n⚓➠★★: @ASIgroup\n\n📖 ${esc(postData.story)}`;
+
       try {
         const tgForm = new FormData();
-        tgForm.append("chat_id", settings.chat_id);
+        tgForm.append("chat_id", chatId);
+        tgForm.append("caption", caption);
         tgForm.append("parse_mode", "HTML");
-        let res;
-        if (photoUrl && photoUrl.startsWith("http")) {
-          tgForm.append("photo", photoUrl);
-          tgForm.append("caption", text);
-          res = await fetch(`https://api.telegram.org/bot${settings.bot_token}/sendPhoto`, { method: "POST", body: tgForm });
-        } else {
-          tgForm.append("text", text);
-          res = await fetch(`https://api.telegram.org/bot${settings.bot_token}/sendMessage`, { method: "POST", body: tgForm });
+        if (file) tgForm.append("photo", file);
+        else if (postData.image_url && postData.image_url.startsWith("http") && !postData.image_url.includes("/api/tg-img/")) {
+          tgForm.append("photo", postData.image_url);
         }
-        if (!res.ok) return { ok: false, reason: await res.text() };
-        return { ok: true };
-      } catch (err) {
-        return { ok: false, reason: String(err) };
+
+        const apiUrl = (file || (postData.image_url && postData.image_url.startsWith("http") && !postData.image_url.includes("/api/tg-img/")))
+          ? `https://api.telegram.org/bot${botToken}/sendPhoto`
+          : `https://api.telegram.org/bot${botToken}/sendMessage`;
+
+        if (apiUrl.includes("sendMessage")) {
+          tgForm.append("text", caption);
+          tgForm.delete("caption");
+          tgForm.delete("photo");
+        }
+
+        const res = await fetch(apiUrl, { method: "POST", body: tgForm });
+        const data = await res.json();
+        if (!data.ok) return { ok: false, reason: data.description };
+
+        let fileId = null;
+        if (data.result.photo) {
+          const best = data.result.photo.pop();
+          fileId = best.file_id;
+        }
+        const channelUsername = (settings.channel_link || "hindisubinganime").split("/").pop().replace("@","").replace("https://t.me/","").replace("http://t.me/","");
+        const publicLink = `https://t.me/${channelUsername}/${data.result.message_id}`;
+
+        return { ok: true, message_id: data.result.message_id, file_id: fileId, public_link: publicLink, result: data.result };
+      } catch (e) {
+        return { ok: false, reason: String(e) };
       }
     };
 
+    // --- TELEGRAM IMAGE PROXY ---
+    if (url.pathname.startsWith("/api/tg-img/")) {
+      const fileId = url.pathname.split("/").pop();
+      const settings = (await kvGet("settings", {})) || {};
+      const botToken = settings.bot_token || env.TELEGRAM_BOT_TOKEN;
+      if (!botToken) return new Response("Bot not set", { status: 400 });
+      try {
+        const fi = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`).then(r=>r.json());
+        if (!fi.ok) return new Response("File not found", { status: 404 });
+        const imgRes = await fetch(`https://api.telegram.org/file/bot${botToken}/${fi.result.file_path}`);
+        return new Response(imgRes.body, {
+          headers: { "Content-Type": "image/jpeg", "Cache-Control": "public, max-age=31536000", "Access-Control-Allow-Origin": "*" }
+        });
+      } catch (e) {
+        return new Response("Error", { status: 500 });
+      }
+    }
+
     // =========================================================================
-    // 🚀 PWA ENGINE: SMART CACHING
+    // PWA ENGINE: SMART CACHING
     // =========================================================================
 
     if (url.pathname === "/manifest.json") {
@@ -126,9 +180,8 @@ export default {
     if (url.pathname === "/api/data" && method === "GET") {
       let posts = (await kvGet("posts", [])) || [];
       posts.sort((a, b) => b.updatedAt - a.updatedAt);
-      const settings = (await kvGet("settings", { site_name: "ASI Animes", channel_link: "https://t.me/" })) || {};
+      const settings = (await kvGet("settings", { site_name: "ASI Animes", channel_link: "https://t.me/hindisubinganime" })) || {};
       
-      // SECURITY: Public users only see safe settings (Ads, APK)
       const safeSettings = { 
         channel_link: settings.channel_link,
         ad_head: settings.ad_head,
@@ -137,11 +190,9 @@ export default {
         apk_link: settings.apk_link
       };
 
-      // SECURITY: Only Admin gets API Keys and Decrypt Passwords
       if (await isAdmin()) {
         const shorteners = (await kvGet("shorteners", [])) || [];
         const paid_requests = (await kvGet("paid_requests", [])) || [];
-        // Send full settings to admin
         return json({ posts, settings, shorteners, paid_requests, admin: true });
       }
 
@@ -151,14 +202,46 @@ export default {
     if (url.pathname === "/api/posts" && method === "POST") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
       
-      const body = await request.json();
+      let body = {}, file = null;
+      const ct = request.headers.get("content-type") || "";
+      if (ct.includes("multipart/form-data") || ct.includes("form-data")) {
+        const fd = await request.formData();
+        file = fd.get("file");
+        body.name = fd.get("name") || "Untitled";
+        body.category = fd.get("category") || "Uncategorized";
+        body.genres = fd.get("genres") || "";
+        body.release = fd.get("release") || "";
+        body.story = fd.get("story") || "";
+        body.image_url = fd.get("image_url") || "";
+        body.id = fd.get("id") || "";
+      } else {
+        body = await request.json();
+      }
+
       let posts = (await kvGet("posts", [])) || [];
       const settings = (await kvGet("settings", {})) || {};
-      
+
+      let finalImageUrl = body.image_url || "";
+      let tgFileId = null;
+      let tgPublicLink = null;
+      let tgMsgId = null;
+
+      if (file && file.size > 0) {
+        const tg = await sendTelegramPost(settings, body, file);
+        if (!tg.ok) return json({ error: "Telegram: " + tg.reason }, 400);
+        tgFileId = tg.file_id;
+        tgPublicLink = tg.public_link;
+        tgMsgId = tg.message_id;
+        finalImageUrl = tg.file_id ? `/api/tg-img/${tg.file_id}` : body.image_url;
+      }
+
       const newPost = {
         id: body.id || "p_" + Date.now(),
         name: body.name || "Untitled",
-        image_url: body.image_url || "",
+        image_url: finalImageUrl || body.image_url || "",
+        tg_file_id: tgFileId,
+        telegram_url: tgPublicLink,
+        telegram_id: tgMsgId,
         category: body.category || "Uncategorized",
         genres: body.genres || "",
         story: body.story || "",
@@ -170,12 +253,22 @@ export default {
       posts.unshift(newPost);
       await kvSet("posts", posts);
 
-      let telegramResult = { ok: true };
-      let hashGenres = newPost.genres.split(/[,.]+/).map(g => g.trim()).filter(g => g).map(g => '#' + g.replace(/\s+/g, '')).join(' ');
-      const escHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      const tgMsg = "Name: <b>" + escHtml(newPost.name) + "</b> ❞\n\nCategory:\n<b>" + escHtml(newPost.category) + "</b> ❞\n\nGenre: " + escHtml(hashGenres) + "\nRelease: " + escHtml(newPost.release || '-') + "\n\n🔥 ╰┈➤ ♡𝙰𝙽𝙸𝙼𝙴 𝙱𝚈_𝙰𝚂𝙸✨\n⚓➠★★: @ASIgroup\n\n📖 " + escHtml(newPost.story);
-      
-      telegramResult = await sendTelegramNotification(settings, tgMsg, newPost.image_url);
+      let telegramResult = { ok: true, public_link: tgPublicLink };
+      if (!file) {
+        const tg2 = await sendTelegramPost(settings, newPost, null);
+        telegramResult = tg2;
+        if (tg2.ok) {
+          newPost.telegram_url = tg2.public_link;
+          newPost.telegram_id = tg2.message_id;
+          if (tg2.file_id) {
+            newPost.tg_file_id = tg2.file_id;
+            newPost.image_url = `/api/tg-img/${tg2.file_id}`;
+          }
+          posts = posts.filter(p => p.id !== newPost.id);
+          posts.unshift(newPost);
+          await kvSet("posts", posts);
+        }
+      }
 
       return json({ success: true, post: newPost, telegram: telegramResult });
     }
@@ -186,7 +279,7 @@ export default {
       let posts = (await kvGet("posts", [])) || [];
       posts = posts.filter(p => p.id !== id);
       await kvSet("posts", posts);
-      await kvDelete(`ep_${id}`); // Clean KV Memory Properly
+      await kvDelete(`ep_${id}`);
       return json({ success: true });
     }
 
@@ -245,7 +338,7 @@ export default {
       return json({ success: true });
     }
 
-    // STRICT SHORTENER LOGIC - NEVER EXPOSE ORIGINAL LINK
+    // STRICT SHORTENER LOGIC - SECOND CODE WALA ROBUST
     if (url.pathname === "/api/get-link") {
       const epId = url.searchParams.get("ep_id"); 
       const postId = url.searchParams.get("post_id");
@@ -258,7 +351,6 @@ export default {
       const targetUrl = ep.download_link || ep.play_link; 
       if (!targetUrl) return json({ error: "Empty link" }, 400);
       
-      // VIP CHECK (Only VIP gets direct link)
       let isPremium = false;
       const premiumUsers = (await kvGet("premium_users", [])) || [];
       if (userKey) {
@@ -292,6 +384,10 @@ export default {
             const j = JSON.parse(t);
             const cand = j.shortenedUrl || j.short_url || j.shortUrl || j.url || j.link || j.data || j.result;
             if (typeof cand === "string" && cand.startsWith("http")) return cand;
+            if (j.data && typeof j.data === "object") {
+              const inner = j.data.url || j.data.short_url;
+              if (inner && inner.startsWith("http")) return inner;
+            }
           } catch (e) {}
           const m = t.match(/https?:\/\/[^\s"']+/);
           return m ? m[0] : null;
@@ -302,34 +398,41 @@ export default {
           const domain = rawDomain.replace(/^(https?:\/\/)?(www\.)?/, "").replace(/\/$/, "").split("/")[0];
           const apiKey = activeSh.api_key || activeSh.apiKey;
           const enc = encodeURIComponent(targetUrl);
-
           const apiDomain = domain.startsWith("api.") ? domain : "api." + domain;
-          
-          // Timeout to prevent 504 Gateway Timeout on Cloudflare
-          const fetchPromise = fetch(`https://${apiDomain}/api?api=${apiKey}&url=${enc}&format=text`, {
-            method: 'GET',
-            headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
+          const tryDomains = [...new Set([apiDomain, domain])];
+          const attempts = [];
+          tryDomains.forEach(d => {
+            attempts.push(`https://${d}/api?api=${apiKey}&url=${enc}&format=text`);
+            attempts.push(`https://${d}/api?api=${apiKey}&url=${enc}`);
           });
-          
-          const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 4000));
-          const r = await Promise.race([fetchPromise, timeoutPromise]);
-          
-          if (r.ok) {
-            const txt = await r.text();
-            const shortLink = extractShortUrl(txt);
-            if (shortLink) {
-              return json({ direct: false, url: shortLink, shortener: domain });
+          const fetchOptions = {
+            method: 'GET',
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "application/json, text/plain, */*"
             }
+          };
+          for (const apiUrl of attempts) {
+            try {
+              const r = await fetch(apiUrl, fetchOptions);
+              const txt = await r.text();
+              const shortLink = extractShortUrl(txt);
+              if (shortLink) {
+                return json({ direct: false, url: shortLink, shortener: domain });
+              }
+            } catch (e) {}
           }
-        } catch (err) {
-           // Ignore to throw strict error below
-        }
+          try {
+            const pr = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(attempts[0])}`);
+            const pd = await pr.json();
+            const sl = pd.contents ? extractShortUrl(pd.contents) : null;
+            if (sl) return json({ direct: false, url: sl, via: "proxy" });
+          } catch (e) {}
+        } catch (err) {}
         
-        // STRICT LOCK: If Shortener API is down or fails, DO NOT give direct link. Give Error.
-        return json({ error: "Shortener server is busy. Please try clicking download again." }, 500);
+        return json({ error: "Shortener service is currently busy or down. Please try again in 5 minutes." }, 500);
       }
       
-      // If Admin has deleted ALL shorteners, then obviously they want it direct
       return json({ direct: true, url: targetUrl });
     }
 
@@ -361,12 +464,16 @@ export default {
       users.unshift(newUser);
       await kvSet("premium_users", users);
 
-      // Async telegram notify so it doesn't block response
       const settings = (await kvGet("settings", {})) || {};
       const tgMsg = `💎 <b>New VIP Pass Activated!</b>\n\n📧 <b>Email:</b> ${newUser.email}\n🔑 <b>Key:</b> ${newUser.key}\n⏳ <b>Expires:</b> ${expiry.toLocaleString()}`;
       
-      // Workaround for ctx.waitUntil issue if needed, but Cloudflare supports it here normally.
-      ctx.waitUntil(sendTelegramNotification(settings, tgMsg));
+      ctx.waitUntil((async()=>{
+        const bot = settings.bot_token || env.TELEGRAM_BOT_TOKEN;
+        const chat = settings.chat_id || env.TELEGRAM_CHAT_ID;
+        if(bot && chat){
+          await fetch(`https://api.telegram.org/bot${bot}/sendMessage`, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ chat_id: chat, text: tgMsg, parse_mode:"HTML" }) });
+        }
+      })());
 
       return json({ success: true, user: newUser });
     }
@@ -421,7 +528,6 @@ function renderFullAppHTML(settings) {
   <link rel="manifest" href="/manifest.json">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
-  <!-- Server Injected Ads (Head) - Monetag / AdSense Script -->
   ${adHead}
 
   <style>
@@ -519,13 +625,11 @@ function renderFullAppHTML(settings) {
 
     .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #111e16; border: 1px solid var(--primary); color: #fff; padding: 8px 18px; border-radius: 30px; font-size: 12px; font-weight: bold; z-index: 2000; display: none; }
     
-    /* Ads Styling */
     .ad-banner-container { text-align: center; margin: 15px auto; max-width: 100%; overflow: hidden; display: flex; justify-content: center; }
   </style>
 </head>
 <body>
 
-  <!-- Server Injected Ads (Body) - Adsterra Popunder etc. -->
   ${adBody}
 
   <div class="toast" id="toast"></div>
@@ -545,7 +649,6 @@ function renderFullAppHTML(settings) {
   <div id="catalogView">
     <div class="slider" id="featuredSlider"></div>
     
-    <!-- Banner Ad Space (Catalog) -->
     ${adBanner ? `<div class="ad-banner-container">${adBanner}</div>` : ''}
 
     <div class="section-head">
@@ -558,7 +661,6 @@ function renderFullAppHTML(settings) {
     <button class="back-btn" onclick="goHome()"><i class="fa-solid fa-arrow-left"></i> Back to Catalog</button>
     <div class="detail-meta-box" id="detailMeta"></div>
     
-    <!-- Banner Ad Space (Player Top) -->
     ${adBanner ? `<div class="ad-banner-container">${adBanner}</div>` : ''}
 
     <div class="player-box" id="playerBox">
@@ -584,8 +686,6 @@ function renderFullAppHTML(settings) {
     <div class="nav-item" onclick="openDecryptModal()"><i class="fa-solid fa-key"></i>Unlock Key</div>
     <div class="nav-item" onclick="openAZModal()"><i class="fa-solid fa-arrow-down-a-z"></i>A-Z</div>
     <a id="tgLink" href="#" target="_blank" class="nav-item"><i class="fa-brands fa-telegram"></i>Telegram</a>
-    
-    <!-- Dynamic APK Download Button -->
     ${apkLink ? `<a href="${apkLink}" target="_blank" class="nav-item" style="color:var(--accent);"><i class="fa-brands fa-android"></i>App</a>` : ''}
   </div>
 
@@ -628,12 +728,12 @@ function renderFullAppHTML(settings) {
             <textarea id="autoDetectInp" class="form-control" style="height:80px; font-size:11px;" placeholder="Paste raw text details (Name: Naruto, Season: 1, Story: ...)" oninput="handleAutoDetect()"></textarea>
           </div>
           <div class="form-group">
-            <label>Poster Image (ImgBB Permanent Cloud Upload)</label>
+            <label>Poster Image (Telegram CDN - No ImgBB)</label>
             <div style="display:flex; gap:6px;">
               <input type="file" id="pImgFile" class="form-control" accept="image/*">
-              <button type="button" class="pctrl-btn primary" onclick="uploadImgBB()">Upload API</button>
+              <span style="font-size:10px;color:var(--text-muted);margin-top:8px">File select karo, direct Telegram pe jayega</span>
             </div>
-            <input type="text" id="pImgUrl" class="form-control" placeholder="Direct Image URL (Or paste external link)" style="margin-top:6px;" required>
+            <input type="text" id="pImgUrl" class="form-control" placeholder="OR Direct Image URL (external)" style="margin-top:6px;">
           </div>
           <div class="form-group">
             <label>Post/Anime Name</label>
@@ -840,7 +940,7 @@ function renderFullAppHTML(settings) {
       
       const chips = document.getElementById('catChips').querySelectorAll('.chip');
       chips.forEach(c => c.classList.remove('active'));
-      event.target.classList.add('active');
+      if(event) event.target.classList.add('active');
       
       renderGenreFilters(appData.posts);
       applyFilters();
@@ -872,7 +972,7 @@ function renderFullAppHTML(settings) {
       currentGenre = gen;
       const chips = document.getElementById('genreChips').querySelectorAll('.chip');
       chips.forEach(c => c.classList.remove('active'));
-      event.target.classList.add('active');
+      if(event) event.target.classList.add('active');
       applyFilters();
     }
 
@@ -933,7 +1033,7 @@ function renderFullAppHTML(settings) {
           </div>
           <div class="card-meta">
             <div class="card-title">\${p.name}</div>
-            <div class="card-sub">\${p.genres || p.season || ''}</div>
+            <div class="card-sub">\${p.genres || p.season || ''} \${p.telegram_url ? '• <a href="'+p.telegram_url+'" target="_blank" style="color:var(--primary)">TG:'+p.telegram_url.split('/').pop()+'</a>' : ''}</div>
           </div>
         </div>
       \`).join('');
@@ -970,6 +1070,7 @@ function renderFullAppHTML(settings) {
           <p><strong>Category:</strong> \${currentPost.category}</p>
           <p><strong>Genre:</strong> \${currentPost.genres || 'N/A'}</p>
           <p><strong>Release:</strong> \${currentPost.release || 'N/A'}</p>
+          <p><strong>Telegram:</strong> <a href="\${currentPost.telegram_url||'#'}" target="_blank" style="color:var(--primary)">\${currentPost.telegram_url||'Not linked'}</a></p>
           <p><strong>Story:</strong> \${currentPost.story || 'N/A'}</p>
         </div>
       \`;
@@ -1109,8 +1210,10 @@ function renderFullAppHTML(settings) {
       if (oldFrame) oldFrame.remove();
       box.classList.remove('theater', 'floating-pip');
       box.style.display = 'none';
-      document.getElementById('playerMenuBtn').style.display = 'none';
-      document.getElementById('playerMenu').classList.remove('open');
+      const menuBtn = document.getElementById('playerMenuBtn');
+      if(menuBtn) menuBtn.style.display = 'none';
+      const menu = document.getElementById('playerMenu');
+      if(menu) menu.classList.remove('open');
 
       document.getElementById('catChips').style.display = 'flex';
       if(currentCategory !== 'ALL') {
@@ -1170,7 +1273,6 @@ function renderFullAppHTML(settings) {
 
       sessionPin = pin;
       
-      // Request Data again with PIN to unlock Admin Secrets
       const checkRes = await fetch('/api/data', { headers: { 'X-Admin-Pin': sessionPin } });
       const data = await checkRes.json();
       
@@ -1179,7 +1281,6 @@ function renderFullAppHTML(settings) {
         return alert('❌ Galat PIN! Dobara try karo.');
       }
       
-      // Update appData with unlocked admin data
       appData = data;
 
       document.getElementById('adminLock').style.display = 'none';
@@ -1198,12 +1299,12 @@ function renderFullAppHTML(settings) {
     
     async function loadAdminDataUI() {
       const sel = document.getElementById('epPostSelect');
-      sel.innerHTML = '<option value="">-- Select Anime --</option>' + appData.posts.map(p => \`<option value="\${p.id}">\${p.name}</option>\`).join('');
+      sel.innerHTML = '<option value="">-- Select Anime --</option>' + appData.posts.map(p => \`<option value="\${p.id}">\${p.name} - \${p.telegram_url||''}</option>\`).join('');
       
       const delList = document.getElementById('deleteList');
       delList.innerHTML = appData.posts.map(p => \`
         <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid var(--border); background:rgba(0,0,0,0.2); margin-bottom:4px; border-radius:6px;">
-          <span style="font-size:12px; color:#fff; word-break:break-all;">\${p.name}</span>
+          <span style="font-size:12px; color:#fff; word-break:break-all;">\${p.name} - \${p.telegram_url||''}</span>
           <button style="background:#ff4d4d; color:#fff; border:none; padding:5px 10px; border-radius:4px; font-size:11px; font-weight:bold; cursor:pointer;" onclick="deletePost('\${p.id}')">Delete Post Data</button>
         </div>
       \`).join('');
@@ -1374,31 +1475,43 @@ function renderFullAppHTML(settings) {
       if (res.ok) { showToast('Ads & APK Settings Saved! Page reloading...'); setTimeout(()=> location.reload(), 1500); }
     }
 
-    async function uploadImgBB() {
-      const file = document.getElementById('pImgFile').files[0];
-      if (!file) return alert("Pehle File select karo Upload karne ke liye!");
-      showToast("Uploading Image to Permanent Server...");
-      const fd = new FormData();
-      fd.append('image', file);
-      try {
-        const res = await fetch("https://api.imgbb.com/1/upload?key=302521c3fa19b023e3c60523098f98d0", { method: "POST", body: fd });
-        const data = await res.json();
-        if(data.success) {
-           document.getElementById('pImgUrl').value = data.data.url;
-           showToast("Image Uploaded and Secured!");
-        } else { alert("Upload failed: Check network"); }
-      } catch(e) { alert("Upload error"); }
-    }
-
     async function savePost() {
       const name = document.getElementById('pName').value.trim();
-      const image_url = document.getElementById('pImgUrl').value.trim();
       const category = document.getElementById('pCategory').value.trim();
       const genres = document.getElementById('pGenre').value.trim();
       const release = document.getElementById('pRelease').value.trim();
       const story = document.getElementById('pStory').value.trim();
+      const image_url = document.getElementById('pImgUrl').value.trim();
       
       if (!name) return alert('Anime name required!');
+      
+      const fileInput = document.getElementById('pImgFile');
+      const file = fileInput.files[0];
+
+      if (file) {
+        showToast('Uploading to Telegram CDN...');
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('name', name);
+        fd.append('category', category);
+        fd.append('genres', genres);
+        fd.append('release', release);
+        fd.append('story', story);
+        fd.append('image_url', image_url);
+        
+        const res = await fetch('/api/posts', { method: 'POST', body: fd, headers: { 'X-Admin-Pin': sessionPin } });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          showToast('Published! Telegram: ' + (data.post.telegram_url || ''));
+          document.getElementById('pName').value = '';
+          document.getElementById('pImgUrl').value = '';
+          document.getElementById('pImgFile').value = '';
+          await loadData(); loadAdminDataUI();
+        } else {
+          alert('Failed: ' + (data.error || 'Auth'));
+        }
+        return;
+      }
       
       const res = await adminFetch('/api/posts', {
         method: 'POST',
@@ -1410,7 +1523,7 @@ function renderFullAppHTML(settings) {
           if (data.telegram && data.telegram.ok === false) {
             alert('⚠️ Post saved, but failed to send to Telegram.\\nReason: ' + data.telegram.reason);
           } else {
-            showToast('Post Published & Sent to Telegram!');
+            showToast('Post Published & Sent to Telegram! Link: ' + (data.post.telegram_url || ''));
           }
           document.getElementById('pName').value = '';
           document.getElementById('pImgUrl').value = '';

@@ -1,8 +1,6 @@
 /**
  * ASI Animes / AnimeBox - FINAL MERGED COMPLETE CODE
- * Base: First code (1400 lines) SAME TO SAME - Ads + APK + Design preserved
- * Changes: ImgBB DELETED, Telegram CDN as image source, Shortener = Second code robust logic
- * KV: stores telegram_url + tg_file_id + /api/tg-img/ proxy - never fills
+ * Updated: Pagination, D1 Episodes Migration, SEO OG Tags, SPA Deep Linking, Security & Image .jpg extensions
  */
 
 export default {
@@ -22,6 +20,19 @@ export default {
     const url = new URL(request.url);
     const method = request.method;
     const adminPinHeader = request.headers.get("X-Admin-Pin");
+    
+    // Security Goal 3: IP Rate Limiting for Admin PIN
+    const clientIP = request.headers.get("CF-Connecting-IP") || "127.0.0.1";
+    const failKey = `fail_${clientIP}`;
+    let fails = 0;
+    if (env.ANIME_KV) {
+      fails = parseInt(await env.ANIME_KV.get(failKey)) || 0;
+      if (fails >= 5) {
+        return new Response(JSON.stringify({ error: "Blocked for 15 minutes due to too many failed attempts." }), { 
+          status: 429, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
+        });
+      }
+    }
 
     const json = (data, status = 200) => new Response(JSON.stringify(data), {
       status, 
@@ -49,9 +60,16 @@ export default {
     };
 
     const isAdmin = async () => {
+      if (!adminPinHeader) return false;
       const s = (await kvGet("settings", {})) || {};
-      const actualPin = s.admin_pin || "admin123";
-      return adminPinHeader === actualPin;
+      const actualPin = s.admin_pin || "Admin@Secure2025!";
+      if (adminPinHeader === actualPin) {
+        if (env.ANIME_KV && fails > 0) await kvDelete(failKey);
+        return true;
+      } else {
+        if (env.ANIME_KV) await env.ANIME_KV.put(failKey, JSON.stringify(fails + 1), { expirationTtl: 900 });
+        return false;
+      }
     };
 
     // Auto VIP clean
@@ -66,7 +84,7 @@ export default {
       }
     })());
 
-    // Telegram sender - returns file_id + public_link
+    // Telegram sender
     const sendTelegramPost = async (settings, postData, file = null) => {
       const botToken = settings.bot_token || env.TELEGRAM_BOT_TOKEN;
       const chatId = settings.chat_id || env.TELEGRAM_CHAT_ID;
@@ -74,7 +92,12 @@ export default {
 
       const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       let hash = (postData.genres || "").split(/[,.]+/).map(g=>g.trim()).filter(g=>g).map(g=>'#'+g.replace(/\s+/g,'')).join(' ');
-      const caption = `Name: <b>${esc(postData.name)}</b> ❞\n\nCategory:\n<b>${esc(postData.category)}</b> ❞\n\nGenre: ${esc(hash)}\nRelease: ${esc(postData.release || '-')}\n\n🔥 ╰┈➤ ♡𝘼𝙉𝙄𝙈𝙀 𝘽𝙔_𝘼𝙎𝙄✨\n⚓➠★★: @ASIgroup\n\n📖 ${esc(postData.story)}`;
+      
+      const channelLink = settings.channel_link || "https://t.me/hindisubinganime";
+      const groupLink = settings.group_link || "@ASIgroup";
+      const siteLink = settings.site_link || "https://asif3543.github.io/asi-anime/";
+
+      const caption = `Name: <b>${esc(postData.name)}</b> ❞\n➖➖➖➖➖➖➖➖➖➖➖➖\nCategory:\n<b>${esc(postData.category)}</b> ❞\n➖➖➖➖➖➖➖➖➖➖➖➖\nGenre: ${hash}\nRelease: ${esc(postData.release || '-')}\n➖➖➖➖➖➖➖➖➖➖➖➖\n🔥 ╰┈➤ ♡${esc(channelLink)}✨\n➖➖➖➖➖➖➖➖➖➖➖➖\n⚓➠★★: ${esc(groupLink)}\n🪱 ${esc(siteLink)}`;
 
       try {
         const tgForm = new FormData();
@@ -116,7 +139,19 @@ export default {
 
     // --- TELEGRAM IMAGE PROXY ---
     if (url.pathname.startsWith("/api/tg-img/")) {
-      const fileId = url.pathname.split("/").pop();
+      let fileId = url.pathname.split("/").pop();
+      if (fileId.endsWith('.jpg')) fileId = fileId.slice(0, -4);
+      
+      const referer = request.headers.get("Referer") || "";
+      const userAgent = request.headers.get("User-Agent") || "";
+      const isBot = /facebook|whatsapp|telegram|bot|discord/i.test(userAgent);
+      const urlHost = new URL(request.url).hostname;
+      
+      // Goal 5: CDN Protection
+      if (!isBot && (!referer || (!referer.includes(urlHost) && !referer.includes("asi-anime")))) {
+         return new Response("Forbidden. Protected Image CDN.", { status: 403 });
+      }
+
       const settings = (await kvGet("settings", {})) || {};
       const botToken = settings.bot_token || env.TELEGRAM_BOT_TOKEN;
       if (!botToken) return new Response("Bot not set", { status: 400 });
@@ -131,10 +166,6 @@ export default {
         return new Response("Error", { status: 500 });
       }
     }
-
-    // =========================================================================
-    // PWA ENGINE: SMART CACHING
-    // =========================================================================
 
     if (url.pathname === "/manifest.json") {
       const manifest = {
@@ -155,7 +186,7 @@ export default {
 
     if (url.pathname === "/sw.js") {
       const swScript = `
-        const CACHE_NAME = 'animebox-pwa-v10';
+        const CACHE_NAME = 'animebox-pwa-v11';
         const STATIC_ASSETS = ['/', '/manifest.json', 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css'];
         self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS))); self.skipWaiting(); });
         self.addEventListener('activate', (e) => { self.clients.claim(); });
@@ -171,6 +202,21 @@ export default {
         });
       `;
       return new Response(swScript, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Service-Worker-Allowed": "/" } });
+    }
+
+    if (url.pathname === "/robots.txt") {
+      return new Response(`User-agent: *\nAllow: /\nSitemap: https://${url.hostname}/sitemap.xml`, {
+        headers: { "Content-Type": "text/plain" }
+      });
+    }
+
+    if (url.pathname === "/sitemap.xml") {
+      let posts = await kvGet("posts", []);
+      let urls = posts.map(p => `<url><loc>https://${url.hostname}/?id=${p.id}</loc><lastmod>${new Date(p.updatedAt).toISOString()}</lastmod></url>`).join('');
+      let cats = ["anime-sub", "anime-dub", "k-drama", "movie"];
+      let catUrls = cats.map(c => `<url><loc>https://${url.hostname}/category/${c}</loc></url>`).join('');
+      let xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}${catUrls}</urlset>`;
+      return new Response(xml, { headers: { "Content-Type": "application/xml" } });
     }
 
     // =========================================================================
@@ -193,10 +239,52 @@ export default {
       if (await isAdmin()) {
         const shorteners = (await kvGet("shorteners", [])) || [];
         const paid_requests = (await kvGet("paid_requests", [])) || [];
+        // Admin gets ALL posts directly (Bypassing Pagination)
         return json({ posts, settings, shorteners, paid_requests, admin: true });
       }
 
-      return json({ posts, settings: safeSettings });
+      // Goal 1: Backend Pagination & Search logic for users
+      let page = parseInt(url.searchParams.get("page")) || 1;
+      let limit = parseInt(url.searchParams.get("limit")) || 30;
+      let search = (url.searchParams.get("search") || "").toLowerCase();
+      let cat = url.searchParams.get("cat") || "ALL";
+      let gen = url.searchParams.get("gen") || "ALL";
+
+      let cats = [...new Set(posts.map(p => p.category).filter(Boolean))];
+      let allGenres = new Set();
+      posts.forEach(p => (p.genres||"").split(/[,.]+/).forEach(g => { if(g.trim()) allGenres.add(g.trim()); }));
+      let genres = Array.from(allGenres);
+
+      let filtered = posts;
+      if (cat !== "ALL") filtered = filtered.filter(p => p.category === cat);
+      if (gen !== "ALL") filtered = filtered.filter(p => p.genres && p.genres.includes(gen));
+      if (search) {
+         filtered = filtered.filter(p => 
+            (p.name && p.name.toLowerCase().includes(search)) || 
+            (p.genres && p.genres.toLowerCase().includes(search)) || 
+            (p.category && p.category.toLowerCase().includes(search))
+         );
+      }
+      
+      let total = filtered.length;
+      let paginated = filtered.slice((page - 1) * limit, page * limit);
+      
+      return json({ 
+        posts: paginated, 
+        total, 
+        hasMore: page * limit < total, 
+        settings: safeSettings, 
+        cats, 
+        genres 
+      });
+    }
+
+    if (url.pathname === "/api/post" && method === "GET") {
+      const id = url.searchParams.get("id");
+      let posts = (await kvGet("posts", [])) || [];
+      const post = posts.find(p => p.id === id);
+      if (post) return json(post);
+      return json({ error: "Not found" }, 404);
     }
 
     if (url.pathname === "/api/posts" && method === "POST") {
@@ -211,7 +299,6 @@ export default {
         body.category = fd.get("category") || "Uncategorized";
         body.genres = fd.get("genres") || "";
         body.release = fd.get("release") || "";
-        body.story = fd.get("story") || "";
         body.image_url = fd.get("image_url") || "";
         body.id = fd.get("id") || "";
       } else {
@@ -232,7 +319,7 @@ export default {
         tgFileId = tg.file_id;
         tgPublicLink = tg.public_link;
         tgMsgId = tg.message_id;
-        finalImageUrl = tg.file_id ? `/api/tg-img/${tg.file_id}` : body.image_url;
+        finalImageUrl = tg.file_id ? `/api/tg-img/${tg.file_id}.jpg` : body.image_url;
       }
 
       const newPost = {
@@ -244,7 +331,6 @@ export default {
         telegram_id: tgMsgId,
         category: body.category || "Uncategorized",
         genres: body.genres || "",
-        story: body.story || "",
         release: body.release || "",
         updatedAt: Date.now()
       };
@@ -262,7 +348,7 @@ export default {
           newPost.telegram_id = tg2.message_id;
           if (tg2.file_id) {
             newPost.tg_file_id = tg2.file_id;
-            newPost.image_url = `/api/tg-img/${tg2.file_id}`;
+            newPost.image_url = `/api/tg-img/${tg2.file_id}.jpg`;
           }
           posts = posts.filter(p => p.id !== newPost.id);
           posts.unshift(newPost);
@@ -279,20 +365,30 @@ export default {
       let posts = (await kvGet("posts", [])) || [];
       posts = posts.filter(p => p.id !== id);
       await kvSet("posts", posts);
-      await kvDelete(`ep_${id}`);
+      
+      // Goal 4: Delete associated D1 Episodes
+      try {
+        await env.ANIME_DB.prepare("DELETE FROM episodes WHERE post_id = ?").bind(id).run();
+      } catch (e) { console.log(e) }
+      
       return json({ success: true });
     }
 
+    // Goal 4: Strict D1 Migration For Episodes Fetch
     if (url.pathname === "/api/episodes" && method === "GET") {
       const postId = url.searchParams.get("post_id");
-      const episodes = (await kvGet(`ep_${postId}`, [])) || [];
-      return json({ episodes });
+      try {
+        const { results } = await env.ANIME_DB.prepare("SELECT * FROM episodes WHERE post_id = ? ORDER BY created_at ASC").bind(postId).all();
+        return json({ episodes: results || [] });
+      } catch (err) {
+        return json({ episodes: [] }); // Safe fallback if table is empty
+      }
     }
 
     if (url.pathname === "/api/episodes" && method === "POST") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
       const body = await request.json();
-      let episodes = (await kvGet(`ep_${body.post_id}`, [])) || [];
+      
       const newEp = {
         id: body.id || "ep_" + Date.now(),
         post_id: body.post_id,
@@ -300,21 +396,26 @@ export default {
         label: body.label || "01",
         quality: body.quality || "HD",
         play_link: body.play_link || "",
-        download_link: body.download_link || ""
+        download_link: body.download_link || "",
+        created_at: Date.now()
       };
-      episodes = episodes.filter(e => e.id !== newEp.id);
-      episodes.push(newEp);
-      await kvSet(`ep_${body.post_id}`, episodes);
+
+      try {
+        await env.ANIME_DB.prepare("INSERT INTO episodes (id, post_id, season, label, quality, play_link, download_link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          .bind(newEp.id, newEp.post_id, newEp.season, newEp.label, newEp.quality, newEp.play_link, newEp.download_link, newEp.created_at).run();
+      } catch (e) {
+        return json({ error: "D1 DB Error" }, 500);
+      }
+
       return json({ success: true, episode: newEp });
     }
 
     if (url.pathname.startsWith("/api/episodes/") && method === "DELETE") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
       const epId = url.pathname.split("/").pop();
-      const postId = url.searchParams.get("post_id");
-      let episodes = (await kvGet(`ep_${postId}`, [])) || [];
-      episodes = episodes.filter(e => e.id !== epId);
-      await kvSet(`ep_${postId}`, episodes);
+      try {
+        await env.ANIME_DB.prepare("DELETE FROM episodes WHERE id = ?").bind(epId).run();
+      } catch(e) {}
       return json({ success: true });
     }
 
@@ -338,15 +439,18 @@ export default {
       return json({ success: true });
     }
 
-    // STRICT SHORTENER LOGIC - SECOND CODE WALA ROBUST
     if (url.pathname === "/api/get-link") {
       const epId = url.searchParams.get("ep_id"); 
-      const postId = url.searchParams.get("post_id");
       const userKey = url.searchParams.get("key");
       const deviceId = url.searchParams.get("device_id");
       
-      const episodes = (await kvGet(`ep_${postId}`, [])) || []; 
-      const ep = episodes.find(e => e.id === epId);
+      // Goal 4: Fetch strictly from D1 for shortener bypass
+      let ep = null;
+      try {
+         const { results } = await env.ANIME_DB.prepare("SELECT * FROM episodes WHERE id = ?").bind(epId).all();
+         if (results && results.length > 0) ep = results[0];
+      } catch (e) {}
+
       if (!ep) return json({ error: "Episode not found" }, 404);
       const targetUrl = ep.download_link || ep.play_link; 
       if (!targetUrl) return json({ error: "Empty link" }, 400);
@@ -375,7 +479,6 @@ export default {
       
       if (activeShorteners.length > 0) {
         const activeSh = activeShorteners[Math.floor(Math.random() * activeShorteners.length)];
-
         const extractShortUrl = (raw) => {
           if (!raw) return null;
           const t = raw.trim();
@@ -500,19 +603,32 @@ export default {
       return json({ success: true });
     }
 
-    // SERVER-SIDE HTML RENDER
+    // SERVER-SIDE HTML RENDER - Dynamic SEO
     const siteSettings = (await kvGet("settings", {})) || {};
-    return new Response(renderFullAppHTML(siteSettings), {
+    let seoPost = null;
+    if (url.searchParams.has("id")) {
+      const posts = await kvGet("posts", []);
+      seoPost = posts.find(p => p.id === url.searchParams.get("id"));
+    }
+    
+    const origin = url.origin;
+
+    return new Response(renderFullAppHTML(siteSettings, seoPost, origin), {
       headers: { "Content-Type": "text/html;charset=UTF-8" }
     });
   }
 };
 
-function renderFullAppHTML(settings) {
+function renderFullAppHTML(settings, post, origin) {
   const adHead = settings.ad_head || '';
   const adBody = settings.ad_body || '';
   const adBanner = settings.ad_banner || '';
   const apkLink = settings.apk_link || '';
+
+  // Goal 2A: Full Dynamic OG Tag setup + Fallback
+  const pageTitle = post ? post.name + " Hindi Dubbed | ASI Animes" : "ASI Animes | Watch Hindi Sub & Hindi Dub Anime Online";
+  const pageDesc = post ? post.name + " Hindi Dubbed Download. Watch " + post.name + " in Hindi Sub/Dub." : "Best website to watch Hindi Sub Anime, Hindi Dub Anime, K-Drama Hindi";
+  const ogImg = post ? (post.tg_file_id ? origin + '/api/tg-img/' + post.tg_file_id + '.jpg' : post.image_url) : origin + "/favicon.png";
 
   return `<!DOCTYPE html>
 <html lang="hi">
@@ -520,10 +636,16 @@ function renderFullAppHTML(settings) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   
-  <title>ASI Animes | Watch Hindi Sub & Hindi Dub Anime Online</title>
-  <meta name="description" content="Best website to download and watch Hindi dub anime, English sub anime, and latest series for free.">
+  <title>${pageTitle}</title>
+  <meta name="description" content="${pageDesc}">
+  <meta name="keywords" content="Asi anime, Hindi sub anime, Hindi dubb anime, K drama hindi, ${post ? post.genres : ''}">
   <meta name="theme-color" content="#00ff66">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  
+  <meta property="og:title" content="${post ? post.name : 'ASI Animes'}">
+  <meta property="og:description" content="${pageDesc}">
+  <meta property="og:image" content="${ogImg}">
+  <meta property="og:type" content="website">
   
   <link rel="manifest" href="/manifest.json">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -638,13 +760,12 @@ function renderFullAppHTML(settings) {
     <div class="brand" onclick="goHome()">ASI Animes</div>
     <div class="search-box">
       <i class="fa-solid fa-magnifying-glass"></i>
-      <input type="text" id="searchInp" placeholder="Search anime, dramas, movie..." oninput="applyFilters()">
+      <input type="text" id="searchInp" placeholder="Search anime, dramas, movie..." oninput="onSearchInput()">
     </div>
     <button class="btn-head" onclick="openAdmin()"><i class="fa-solid fa-gear"></i> Admin</button>
   </header>
 
   <div class="filter-chips" id="catChips"></div>
-  <div class="filter-chips" id="genreChips" style="display:none; padding-top:10px; border-bottom:1px solid rgba(0,255,102,0.1);"></div>
 
   <div id="catalogView">
     <div class="slider" id="featuredSlider"></div>
@@ -705,7 +826,7 @@ function renderFullAppHTML(settings) {
       <div id="adminLock">
         <div class="form-group">
           <label>Admin PIN Passcode</label>
-          <input type="password" id="adminPinInp" class="form-control" placeholder="Default PIN: admin123">
+          <input type="password" id="adminPinInp" class="form-control" placeholder="Default PIN: Admin@Secure2025!">
         </div>
         <button class="btn-action" onclick="verifyAdmin()">Unlock Control Center</button>
       </div>
@@ -725,7 +846,7 @@ function renderFullAppHTML(settings) {
         <div id="tabPost">
           <div class="form-group" style="background: rgba(0,255,102,0.04); padding:10px; border-radius:8px; border:1px dashed var(--border);">
             <label style="color:var(--primary);"><i class="fa-solid fa-wand-magic-sparkles"></i> Auto Post Fill Parser</label>
-            <textarea id="autoDetectInp" class="form-control" style="height:80px; font-size:11px;" placeholder="Paste raw text details (Name: Naruto, Season: 1, Story: ...)" oninput="handleAutoDetect()"></textarea>
+            <textarea id="autoDetectInp" class="form-control" style="height:80px; font-size:11px;" placeholder="Paste raw text details (Name: Naruto, Season: 1...)" oninput="handleAutoDetect()"></textarea>
           </div>
           <div class="form-group">
             <label>Poster Image (Telegram CDN - No ImgBB)</label>
@@ -750,10 +871,6 @@ function renderFullAppHTML(settings) {
           <div class="form-group">
             <label>Release Year</label>
             <input type="text" id="pRelease" class="form-control" placeholder="2025">
-          </div>
-          <div class="form-group">
-            <label>Short Story/Synopsis</label>
-            <textarea id="pStory" class="form-control" style="height:60px;"></textarea>
           </div>
           <button class="btn-action" onclick="savePost()">Publish Post</button>
         </div>
@@ -868,9 +985,23 @@ function renderFullAppHTML(settings) {
             </div>
           </div>
           <div class="form-group">
+            <label>Group Link ( @ ya full link )</label>
+            <div style="display:flex; gap:6px;">
+              <input type="text" id="cfgGroupLink" class="form-control" placeholder="https://t.me/hindisubanime_q">
+              <button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('group_link')">🗑 Clear</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Website Link</label>
+            <div style="display:flex; gap:6px;">
+              <input type="text" id="cfgSiteLink" class="form-control" placeholder="https://yourdomain.com">
+              <button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('site_link')">🗑 Clear</button>
+            </div>
+          </div>
+          <div class="form-group">
             <label>Admin Access PIN</label>
             <div style="display:flex; gap:6px;">
-              <input type="text" id="cfgPin" class="form-control" placeholder="admin123" autocomplete="off">
+              <input type="text" id="cfgPin" class="form-control" placeholder="Admin@Secure2025!" autocomplete="off">
               <button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('admin_pin')">🗑 Reset</button>
             </div>
           </div>
@@ -881,13 +1012,19 @@ function renderFullAppHTML(settings) {
   </div>
 
   <script>
-    let appData = { posts: [], settings: {}, shorteners: [], paid_requests: [] };
+    let appData = { posts: [], settings: {}, shorteners: [], paid_requests: [], allGenres: [] };
     let currentPost = null;
     let currentCategory = 'ALL';
     let currentGenre = 'ALL';
     let sessionPin = ""; 
     let currentEpisodeList = [];
     let currentEpIndex = -1;
+    
+    // Pagination Variables
+    let currentPage = 1;
+    let hasMorePosts = true;
+    let isFetching = false;
+    let searchTimer = null;
 
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
@@ -895,21 +1032,65 @@ function renderFullAppHTML(settings) {
       });
     }
 
+    // Goal 2B: SPA Deep Linking
     window.onload = async () => {
-      await loadData();
+      await loadData(1, false);
+      const urlParams = new URLSearchParams(window.location.search);
+      const deepId = urlParams.get('id');
+      if (deepId) {
+        await openDetail(deepId);
+      }
     };
 
-    async function loadData() {
+    // Goal 1: Dynamic Data fetching with Pagination
+    async function loadData(page = 1, append = false) {
+      if (isFetching) return;
+      isFetching = true;
       try {
-        const res = await fetch('/api/data');
-        appData = await res.json();
-        renderSlider(appData.posts.slice(0, 5));
-        renderCatFilters(appData.posts);
-        applyFilters();
+        const q = encodeURIComponent(document.getElementById('searchInp').value.trim());
+        const res = await fetch(\`/api/data?page=\${page}&limit=30&search=\${q}&cat=\${encodeURIComponent(currentCategory)}&gen=\${encodeURIComponent(currentGenre)}\`);
+        const data = await res.json();
+        
+        appData.settings = data.settings;
+        hasMorePosts = data.hasMore;
+        currentPage = page;
+
+        if (page === 1) {
+           appData.posts = data.posts;
+           if (!append && q === "" && currentCategory === 'ALL' && currentGenre === 'ALL') {
+               renderCatChips(data.cats || []);
+               appData.allGenres = data.genres || [];
+           }
+           renderSlider(appData.posts.slice(0, 5));
+           document.getElementById('mainGrid').innerHTML = ''; // Clear for fresh grid
+        } else {
+           appData.posts = appData.posts.concat(data.posts);
+        }
+        
+        renderGrid(data.posts, append);
         document.getElementById('tgLink').href = appData.settings?.channel_link || '#';
       } catch (e) {
         showToast('Offline Mode / Network Error');
       }
+      isFetching = false;
+    }
+
+    // Goal 1: Infinite Scroll Trigger
+    window.addEventListener('scroll', () => {
+      if (document.getElementById('catalogView').style.display !== 'none') {
+        if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+          if (hasMorePosts && !isFetching) {
+            loadData(currentPage + 1, true);
+          }
+        }
+      }
+    });
+
+    function onSearchInput() {
+       clearTimeout(searchTimer);
+       searchTimer = setTimeout(() => {
+          loadData(1, false);
+       }, 500);
     }
 
     async function adminFetch(url, options = {}) {
@@ -920,18 +1101,11 @@ function renderFullAppHTML(settings) {
       return fetch(url, options);
     }
 
-    function parseGenreList(genresStr) {
-      if (!genresStr) return [];
-      return genresStr.split(/[,.]+/).map(g => g.trim()).filter(Boolean);
-    }
-
-    function renderCatFilters(posts) {
-      const cats = [...new Set(posts.map(p => p.category).filter(Boolean))];
+    function renderCatChips(cats) {
       const bar = document.getElementById('catChips');
       bar.innerHTML = \`<div class="chip" style="background:var(--accent); color:#000; border-color:var(--accent);" onclick="openGenreModal()"><i class="fa-solid fa-masks-theater"></i> Genres</div>\` +
         \`<div class="chip active" onclick="filterByCat('ALL')">All Categories</div>\` + 
         cats.map(c => \`<div class="chip" onclick="filterByCat('\${c}')">\${c}</div>\`).join('');
-      renderGenreFilters(posts);
     }
 
     function filterByCat(cat) {
@@ -940,47 +1114,15 @@ function renderFullAppHTML(settings) {
       
       const chips = document.getElementById('catChips').querySelectorAll('.chip');
       chips.forEach(c => c.classList.remove('active'));
-      if(event) event.target.classList.add('active');
+      if(event && event.target) event.target.classList.add('active');
       
-      renderGenreFilters(appData.posts);
-      applyFilters();
-    }
-
-    function renderGenreFilters(posts) {
-      const gBar = document.getElementById('genreChips');
-      if (currentCategory === 'ALL') {
-        gBar.style.display = 'none';
-        return;
-      }
-      
-      const catPosts = posts.filter(p => p.category === currentCategory);
-      const gSet = new Set();
-      catPosts.forEach(p => parseGenreList(p.genres).forEach(g => gSet.add(g)));
-      
-      const genres = Array.from(gSet);
-      if (genres.length === 0) {
-        gBar.style.display = 'none';
-        return;
-      }
-      
-      gBar.style.display = 'flex';
-      gBar.innerHTML = \`<div class="chip active" onclick="filterByGenre('ALL')">All Genres</div>\` + 
-        genres.map(g => \`<div class="chip" onclick="filterByGenre('\${g}')">\${g}</div>\`).join('');
-    }
-
-    function filterByGenre(gen) {
-      currentGenre = gen;
-      const chips = document.getElementById('genreChips').querySelectorAll('.chip');
-      chips.forEach(c => c.classList.remove('active'));
-      if(event) event.target.classList.add('active');
-      applyFilters();
+      document.getElementById('gridTitle').innerText = '🔥 Latest Updates';
+      loadData(1, false);
     }
 
     function openGenreModal() {
-      const gSet = new Set();
-      appData.posts.forEach(p => parseGenreList(p.genres).forEach(g => gSet.add(g)));
       const list = document.getElementById('genreModalList');
-      const genres = Array.from(gSet).sort();
+      const genres = appData.allGenres.sort();
       if (genres.length === 0) {
         list.innerHTML = '<p style="color:var(--text-muted); font-size:12px;">No genres available yet.</p>';
       } else {
@@ -993,42 +1135,26 @@ function renderFullAppHTML(settings) {
       closeModal('genreModal');
       currentCategory = 'ALL';
       currentGenre = g;
-      renderCatFilters(appData.posts); 
+      
+      const chips = document.getElementById('catChips').querySelectorAll('.chip');
+      chips.forEach(c => c.classList.remove('active'));
+      
       document.getElementById('gridTitle').innerText = '🎭 Genre: ' + g;
-      applyFilters();
+      loadData(1, false);
     }
 
-    function applyFilters() {
-      let filtered = appData.posts;
-      const q = document.getElementById('searchInp').value.toLowerCase().trim();
-      
-      if (currentCategory !== 'ALL') {
-        filtered = filtered.filter(p => p.category === currentCategory);
-      }
-      if (currentGenre !== 'ALL') {
-        filtered = filtered.filter(p => parseGenreList(p.genres).includes(currentGenre));
-      }
-      if (q) {
-        filtered = filtered.filter(p => 
-          (p.name && p.name.toLowerCase().includes(q)) || 
-          (p.genres && p.genres.toLowerCase().includes(q)) || 
-          (p.category && p.category.toLowerCase().includes(q))
-        );
-      }
-      
-      renderGrid(filtered);
-    }
-
-    function renderGrid(posts) {
+    function renderGrid(posts, append = false) {
       const grid = document.getElementById('mainGrid');
-      if (!posts || posts.length === 0) {
+      if (!append && (!posts || posts.length === 0)) {
         grid.innerHTML = '<p style="grid-column:1/-1; text-align:center; color:var(--text-muted); padding:30px;">No anime found.</p>';
         return;
       }
-      grid.innerHTML = posts.map(p => \`
+      
+      // Goal 6: SEO ALT Tags Added
+      const html = posts.map(p => \`
         <div class="card" onclick="openDetail('\${p.id}')">
           <div class="poster-wrap">
-            \${p.image_url ? \`<img src="\${p.image_url}" loading="lazy" alt="\${p.name}">\` : \`<div class="no-img-text">\${p.name}</div>\`}
+            \${p.image_url ? \`<img src="\${p.image_url}" loading="lazy" alt="\${p.name} Hindi Subbed">\` : \`<div class="no-img-text">\${p.name}</div>\`}
             <span class="category-badge">\${p.category || 'Anime'}</span>
           </div>
           <div class="card-meta">
@@ -1037,6 +1163,9 @@ function renderFullAppHTML(settings) {
           </div>
         </div>
       \`).join('');
+
+      if (append) { grid.innerHTML += html; } 
+      else { grid.innerHTML = html; }
     }
 
     function renderSlider(posts) {
@@ -1045,7 +1174,7 @@ function renderFullAppHTML(settings) {
       slider.style.display = 'flex';
       slider.innerHTML = posts.map(p => \`
         <div class="slide-card" onclick="openDetail('\${p.id}')">
-          \${p.image_url ? \`<img src="\${p.image_url}">\` : ''}
+          \${p.image_url ? \`<img src="\${p.image_url}" alt="\${p.name} Hindi Subbed">\` : ''}
           <div class="slide-overlay">
             <div class="slide-tag">\${p.category || 'Featured'}</div>
             <div class="slide-title">\${p.name}</div>
@@ -1056,22 +1185,30 @@ function renderFullAppHTML(settings) {
 
     async function openDetail(postId) {
       currentPost = appData.posts.find(p => p.id === postId);
-      if (!currentPost) return;
+      
+      // Fallback for SPA Deep linking if the post isn't in current memory due to pagination
+      if (!currentPost) {
+         try {
+            const pRes = await fetch(\`/api/post?id=\${postId}\`);
+            if (pRes.ok) currentPost = await pRes.json();
+         } catch(e) {}
+         if (!currentPost) return showToast("Post not found");
+      }
+
+      window.history.pushState({id: postId}, '', \`/?id=\${postId}\`);
 
       document.getElementById('catalogView').style.display = 'none';
       document.getElementById('catChips').style.display = 'none';
-      document.getElementById('genreChips').style.display = 'none';
       document.getElementById('detailView').classList.add('active');
 
       document.getElementById('detailMeta').innerHTML = \`
-        \${currentPost.image_url ? \`<img src="\${currentPost.image_url}">\` : ''}
+        \${currentPost.image_url ? \`<img src="\${currentPost.image_url}" alt="\${currentPost.name} Hindi Subbed">\` : ''}
         <div class="detail-info">
           <h2>\${currentPost.name}</h2>
           <p><strong>Category:</strong> \${currentPost.category}</p>
           <p><strong>Genre:</strong> \${currentPost.genres || 'N/A'}</p>
           <p><strong>Release:</strong> \${currentPost.release || 'N/A'}</p>
           <p><strong>Telegram:</strong> <a href="\${currentPost.telegram_url||'#'}" target="_blank" style="color:var(--primary)">\${currentPost.telegram_url||'Not linked'}</a></p>
-          <p><strong>Story:</strong> \${currentPost.story || 'N/A'}</p>
         </div>
       \`;
 
@@ -1150,44 +1287,14 @@ function renderFullAppHTML(settings) {
       highlightActiveEpisode(epId);
     }
 
-    function togglePlayerMenu() {
-      document.getElementById('playerMenu').classList.toggle('open');
-    }
-
-    function prevEp() {
-      if (currentEpIndex > 0) {
-        const e = currentEpisodeList[currentEpIndex - 1];
-        playStream(e.play_link, e.id);
-      } else {
-        showToast('Ye pehla episode hai');
-      }
-    }
-
-    function nextEp() {
-      if (currentEpIndex !== -1 && currentEpIndex < currentEpisodeList.length - 1) {
-        const e = currentEpisodeList[currentEpIndex + 1];
-        playStream(e.play_link, e.id);
-      } else {
-        showToast('Ye last episode hai');
-      }
-    }
-
-    function toggleTheater() {
-      document.getElementById('playerBox').classList.toggle('theater');
-    }
-
-    function togglePiP() {
-      const box = document.getElementById('playerBox');
-      box.classList.toggle('floating-pip');
-    }
-
+    function togglePlayerMenu() { document.getElementById('playerMenu').classList.toggle('open'); }
+    function prevEp() { if (currentEpIndex > 0) playStream(currentEpisodeList[currentEpIndex - 1].play_link, currentEpisodeList[currentEpIndex - 1].id); else showToast('Ye pehla episode hai'); }
+    function nextEp() { if (currentEpIndex !== -1 && currentEpIndex < currentEpisodeList.length - 1) playStream(currentEpisodeList[currentEpIndex + 1].play_link, currentEpisodeList[currentEpIndex + 1].id); else showToast('Ye last episode hai'); }
+    function toggleTheater() { document.getElementById('playerBox').classList.toggle('theater'); }
+    function togglePiP() { document.getElementById('playerBox').classList.toggle('floating-pip'); }
     function toggleFullscreen() {
       const box = document.getElementById('playerBox');
-      if (!document.fullscreenElement) {
-        (box.requestFullscreen || box.webkitRequestFullscreen || box.msRequestFullscreen || function(){}).call(box);
-      } else {
-        (document.exitFullscreen || function(){}).call(document);
-      }
+      if (!document.fullscreenElement) { (box.requestFullscreen || box.webkitRequestFullscreen || box.msRequestFullscreen || function(){}).call(box); } else { (document.exitFullscreen || function(){}).call(document); }
     }
 
     async function downloadEp(epId) {
@@ -1195,14 +1302,12 @@ function renderFullAppHTML(settings) {
       const key = localStorage.getItem('vip_key') || '';
       const res = await fetch(\`/api/get-link?post_id=\${currentPost.id}&ep_id=\${epId}&key=\${encodeURIComponent(key)}\`);
       const data = await res.json();
-      if (data.url) {
-        window.open(data.url, '_blank');
-      } else {
-        showToast(data.error || 'Server is busy, try again');
-      }
+      if (data.url) window.open(data.url, '_blank');
+      else showToast(data.error || 'Server is busy, try again');
     }
 
     function goHome() {
+      window.history.pushState({}, '', '/');
       document.getElementById('catalogView').style.display = 'block';
       document.getElementById('detailView').classList.remove('active');
       const box = document.getElementById('playerBox');
@@ -1210,58 +1315,36 @@ function renderFullAppHTML(settings) {
       if (oldFrame) oldFrame.remove();
       box.classList.remove('theater', 'floating-pip');
       box.style.display = 'none';
-      const menuBtn = document.getElementById('playerMenuBtn');
-      if(menuBtn) menuBtn.style.display = 'none';
-      const menu = document.getElementById('playerMenu');
-      if(menu) menu.classList.remove('open');
+      if(document.getElementById('playerMenuBtn')) document.getElementById('playerMenuBtn').style.display = 'none';
+      if(document.getElementById('playerMenu')) document.getElementById('playerMenu').classList.remove('open');
 
       document.getElementById('catChips').style.display = 'flex';
-      if(currentCategory !== 'ALL') {
-          document.getElementById('genreChips').style.display = 'flex';
-      }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
-
-    const AUTODETECT_ALIASES = [
-      ["short story", "story"], ["synopsis", "story"], ["description", "story"], ["desc", "story"], ["story", "story"],
-      ["name", "name"], ["title", "name"], ["naam", "name"],
-      ["category", "category"], ["cat", "category"],
-      ["release date", "release"], ["release", "release"], ["date", "release"], ["year", "release"],
-      ["genres", "genres"], ["genre", "genres"],
-    ];
 
     function handleAutoDetect() {
       const text = document.getElementById("autoDetectInp").value.trim();
       if (!text) return;
 
-      const lines = text.split('\\n');
+      const lines = text.split(/\\n/);
       let currentField = null;
-      let parsed = { name: "", category: "", release: "", genres: "", story: "" };
-      const SEP = "\\\\s*[-:=_,.]+\\\\s*";
+      let parsed = { name: "", category: "", release: "", genres: "" };
+      const SEP = "[ \\t]*[-:=_,.]+[ \\t]*";
+      const aliases = [["name", "name"], ["title", "name"], ["naam", "name"], ["category", "category"], ["cat", "category"], ["release date", "release"], ["release", "release"], ["date", "release"], ["year", "release"], ["genres", "genres"], ["genre", "genres"]];
 
       lines.forEach(line => {
         let matched = false;
-        for (const [alias, field] of AUTODETECT_ALIASES) {
-          const aliasPattern = alias.replace(/ /g, "\\\\s+");
-          const re = new RegExp("^\\\\s*" + aliasPattern + SEP + "(.*)", "i");
-          const m = line.match(re);
-          if (m) {
-            currentField = field;
-            parsed[field] = (parsed[field] ? parsed[field] + "\\n" : "") + m[1].trim();
-            matched = true;
-            break;
-          }
+        for (const [alias, field] of aliases) {
+          const m = line.match(new RegExp("^[ \\t]*" + alias.replace(/ /g, "[ \\t]+") + SEP + "(.*)", "i"));
+          if (m) { currentField = field; parsed[field] = (parsed[field] ? parsed[field] + "\\n" : "") + m[1].trim(); matched = true; break; }
         }
-        if (!matched && currentField && line.trim()) {
-          parsed[currentField] += "\\n" + line.trim();
-        }
+        if (!matched && currentField && line.trim()) parsed[currentField] += "\\n" + line.trim();
       });
 
       if (parsed.name) document.getElementById("pName").value = parsed.name.trim();
       if (parsed.category) document.getElementById("pCategory").value = parsed.category.trim();
       if (parsed.genres) document.getElementById("pGenre").value = parsed.genres.trim();
       if (parsed.release) document.getElementById("pRelease").value = parsed.release.trim();
-      if (parsed.story) document.getElementById("pStory").value = parsed.story.trim();
     }
 
     function openAdmin() { document.getElementById('adminModal').style.display = 'flex'; }
@@ -1270,19 +1353,21 @@ function renderFullAppHTML(settings) {
     async function verifyAdmin() {
       const pin = document.getElementById('adminPinInp').value;
       if(!pin) return alert('Enter PIN!');
-
       sessionPin = pin;
       
       const checkRes = await fetch('/api/data', { headers: { 'X-Admin-Pin': sessionPin } });
-      const data = await checkRes.json();
+      if (checkRes.status === 429) {
+          sessionPin = "";
+          return alert('❌ Too many attempts. You have been temporarily blocked for 15 minutes.');
+      }
       
+      const data = await checkRes.json();
       if (!data.admin) {
         sessionPin = "";
         return alert('❌ Galat PIN! Dobara try karo.');
       }
       
       appData = data;
-
       document.getElementById('adminLock').style.display = 'none';
       document.getElementById('adminBody').style.display = 'block';
       loadAdminDataUI();
@@ -1298,6 +1383,7 @@ function renderFullAppHTML(settings) {
     }
     
     async function loadAdminDataUI() {
+      // appData.posts contains the FULL unpaginated list when fetched as admin
       const sel = document.getElementById('epPostSelect');
       sel.innerHTML = '<option value="">-- Select Anime --</option>' + appData.posts.map(p => \`<option value="\${p.id}">\${p.name} - \${p.telegram_url||''}</option>\`).join('');
       
@@ -1312,6 +1398,8 @@ function renderFullAppHTML(settings) {
       document.getElementById('cfgBotToken').value = ""; 
       document.getElementById('cfgChatId').value = "";
       document.getElementById('cfgTg').value = appData.settings?.channel_link || '';
+      document.getElementById('cfgGroupLink').value = appData.settings?.group_link || '';
+      document.getElementById('cfgSiteLink').value = appData.settings?.site_link || '';
       document.getElementById('cfgPin').value = ""; 
       
       document.getElementById('cfgAdHead').value = appData.settings?.ad_head || '';
@@ -1329,7 +1417,7 @@ function renderFullAppHTML(settings) {
             <button style="background:#ff4d4d; color:#fff; border:none; padding:5px 10px; border-radius:4px; font-size:11px; font-weight:bold; cursor:pointer;" onclick="deleteVipUser('\${encodeURIComponent(u.email)}')">Delete</button>
           </div>
         \`).join('');
-      } catch(err) { console.error("VIP fetch failed"); }
+      } catch(err) {}
 
       const shortList = document.getElementById('shortList');
       shortList.innerHTML = (appData.shorteners || []).map((s, i) => \`
@@ -1366,7 +1454,7 @@ function renderFullAppHTML(settings) {
     async function deletePost(id) {
       if(!confirm("Delete this post and episodes permanently? Memory will be cleaned.")) return;
       const res = await adminFetch(\`/api/posts/\${id}\`, { method: 'DELETE' });
-      if(res.ok) { showToast('Post Deleted!'); await loadData(); loadAdminDataUI(); }
+      if(res.ok) { showToast('Post Deleted!'); await verifyAdmin(); }
       else alert("Auth failed");
     }
 
@@ -1381,7 +1469,6 @@ function renderFullAppHTML(settings) {
       if(!confirm("Delete this VIP User?")) return;
       const res = await adminFetch(\`/api/admin/vip/\${emailParam}\`, { method: 'DELETE' });
       if(res.ok) { showToast('VIP User Deleted!'); loadAdminDataUI(); }
-      else alert("Auth failed");
     }
 
     async function addShortener() {
@@ -1392,7 +1479,6 @@ function renderFullAppHTML(settings) {
       shorteners.push({domain, api_key});
       const res = await adminFetch('/api/settings', { method: 'POST', body: JSON.stringify({ shorteners }) });
       if(res.ok) { document.getElementById('cfgShDom').value = ''; document.getElementById('cfgShKey').value = ''; showToast('Shortener Added!'); verifyAdmin(); }
-      else alert("Save failed");
     }
 
     async function deleteShortener(index) {
@@ -1401,7 +1487,6 @@ function renderFullAppHTML(settings) {
       shorteners.splice(index, 1);
       const res = await adminFetch('/api/settings', { method: 'POST', body: JSON.stringify({ shorteners }) });
       if(res.ok) { showToast('Shortener Deleted!'); verifyAdmin(); }
-      else alert("Auth failed");
     }
 
     async function addPaidRequest() {
@@ -1412,7 +1497,6 @@ function renderFullAppHTML(settings) {
       paid_requests.push({password, original_link});
       const res = await adminFetch('/api/settings', { method: 'POST', body: JSON.stringify({ paid_requests }) });
       if(res.ok) { document.getElementById('paidPass').value = ''; document.getElementById('paidUrl').value = ''; showToast('Key Added!'); verifyAdmin(); }
-      else alert("Save failed");
     }
 
     async function deletePaidKey(index) {
@@ -1421,7 +1505,6 @@ function renderFullAppHTML(settings) {
       paid_requests.splice(index, 1);
       const res = await adminFetch('/api/settings', { method: 'POST', body: JSON.stringify({ paid_requests }) });
       if(res.ok) { showToast('Key Deleted!'); verifyAdmin(); }
-      else alert("Auth failed");
     }
 
     async function clearSettingField(key) {
@@ -1432,36 +1515,30 @@ function renderFullAppHTML(settings) {
       });
       if (res.ok) {
         showToast('Cleared!');
-        const fieldMap = { bot_token: 'cfgBotToken', chat_id: 'cfgChatId', channel_link: 'cfgTg', admin_pin: 'cfgPin' };
+        const fieldMap = { bot_token: 'cfgBotToken', chat_id: 'cfgChatId', channel_link: 'cfgTg', group_link: 'cfgGroupLink', site_link: 'cfgSiteLink', admin_pin: 'cfgPin' };
         if (fieldMap[key]) document.getElementById(fieldMap[key]).value = '';
-        if (key === 'admin_pin') sessionPin = 'admin123';
+        if (key === 'admin_pin') sessionPin = 'Admin@Secure2025!';
         verifyAdmin();
-      } else {
-        alert('Clear failed');
       }
     }
 
     async function saveSettings() {
       const channel_link = document.getElementById('cfgTg').value.trim();
+      const group_link = document.getElementById('cfgGroupLink').value.trim();
+      const site_link = document.getElementById('cfgSiteLink').value.trim();
       const admin_pin = document.getElementById('cfgPin').value.trim();
       const bot_token = document.getElementById('cfgBotToken').value.trim();
       const chat_id = document.getElementById('cfgChatId').value.trim();
 
       const settings = { channel_link };
+      if (group_link) settings.group_link = group_link;
+      if (site_link) settings.site_link = site_link;
       if (admin_pin) settings.admin_pin = admin_pin;
       if (bot_token) settings.bot_token = bot_token;
       if (chat_id) settings.chat_id = chat_id;
 
-      const res = await adminFetch('/api/settings', {
-        method: 'POST',
-        body: JSON.stringify({ settings })
-      });
-      if(res.ok) {
-        showToast('Settings Saved!');
-        if (admin_pin) sessionPin = admin_pin;
-        verifyAdmin();
-      }
-      else { alert('Save fail ho gaya - PIN check karo'); }
+      const res = await adminFetch('/api/settings', { method: 'POST', body: JSON.stringify({ settings }) });
+      if(res.ok) { showToast('Settings Saved!'); if (admin_pin) sessionPin = admin_pin; verifyAdmin(); }
     }
     
     async function saveAdsSettings() {
@@ -1480,7 +1557,6 @@ function renderFullAppHTML(settings) {
       const category = document.getElementById('pCategory').value.trim();
       const genres = document.getElementById('pGenre').value.trim();
       const release = document.getElementById('pRelease').value.trim();
-      const story = document.getElementById('pStory').value.trim();
       const image_url = document.getElementById('pImgUrl').value.trim();
       
       if (!name) return alert('Anime name required!');
@@ -1496,7 +1572,6 @@ function renderFullAppHTML(settings) {
         fd.append('category', category);
         fd.append('genres', genres);
         fd.append('release', release);
-        fd.append('story', story);
         fd.append('image_url', image_url);
         
         const res = await fetch('/api/posts', { method: 'POST', body: fd, headers: { 'X-Admin-Pin': sessionPin } });
@@ -1506,7 +1581,7 @@ function renderFullAppHTML(settings) {
           document.getElementById('pName').value = '';
           document.getElementById('pImgUrl').value = '';
           document.getElementById('pImgFile').value = '';
-          await loadData(); loadAdminDataUI();
+          await verifyAdmin(); 
         } else {
           alert('Failed: ' + (data.error || 'Auth'));
         }
@@ -1515,7 +1590,7 @@ function renderFullAppHTML(settings) {
       
       const res = await adminFetch('/api/posts', {
         method: 'POST',
-        body: JSON.stringify({ name, image_url, category, genres, release, story })
+        body: JSON.stringify({ name, image_url, category, genres, release })
       });
       
       if(res.ok) {
@@ -1527,7 +1602,7 @@ function renderFullAppHTML(settings) {
           }
           document.getElementById('pName').value = '';
           document.getElementById('pImgUrl').value = '';
-          await loadData(); loadAdminDataUI();
+          await verifyAdmin();
       } else { alert("Auth failed"); }
     }
 
@@ -1558,13 +1633,9 @@ function renderFullAppHTML(settings) {
       const email = document.getElementById('vipEmail').value.trim();
       const key = document.getElementById('vipKey').value.trim();
       const days = document.getElementById('vipDays').value;
-
       if(!email || !key) return alert("Fill all fields");
 
-      const res = await adminFetch('/api/premium', {
-        method: 'POST',
-        body: JSON.stringify({ email, key, days })
-      });
+      const res = await adminFetch('/api/premium', { method: 'POST', body: JSON.stringify({ email, key, days }) });
       if(res.ok) {
           showToast('VIP Pass Created & TG Alert Sent!');
           document.getElementById('vipEmail').value = '';
@@ -1575,10 +1646,7 @@ function renderFullAppHTML(settings) {
 
     function openVIPModal() {
       const key = prompt('Enter your VIP Passcode Key:');
-      if (key) {
-        localStorage.setItem('vip_key', key);
-        showToast('VIP Mode Active!');
-      }
+      if (key) { localStorage.setItem('vip_key', key); showToast('VIP Mode Active!'); }
     }
 
     async function openDecryptModal() {
@@ -1595,8 +1663,8 @@ function renderFullAppHTML(settings) {
       const letter = prompt('Enter A-Z letter to filter (e.g. N, D, S):');
       if (letter) {
         const l = letter.toUpperCase();
-        document.getElementById('searchInp').value = '';
-        renderGrid(appData.posts.filter(p => p.name.toUpperCase().startsWith(l)));
+        document.getElementById('searchInp').value = l;
+        onSearchInput(); // Calls debounced filter fetch dynamically over the API
       }
     }
 

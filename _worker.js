@@ -1,10 +1,13 @@
 /**
- * ASI Animes - FINAL with D1 Posts + Category Genre Filter + Search
- * D1 Tables: posts, episodes (SQL upar diya hai)
+ * ASI Animes - FINAL CODE AS PER FINAL CHANGES NOTE
+ * - Posts + Episodes both in D1 (ANIME_DB)
+ * - ANIME_KV for settings, premium, shorteners, paid_requests, fail IP
+ * - Fixed double slash bug, Telegram caption with Insta/YouTube, safeSettings, category dropdown, episode search, genre filter wrap, social buttons
  */
 
 export default {
   async fetch(request, env, ctx) {
+    // CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -19,6 +22,8 @@ export default {
     const url = new URL(request.url);
     const method = request.method;
     const adminPinHeader = request.headers.get("X-Admin-Pin");
+
+    // IP Rate Limit for Admin
     const clientIP = request.headers.get("CF-Connecting-IP") || "127.0.0.1";
     const failKey = `fail_${clientIP}`;
     let fails = 0;
@@ -39,7 +44,7 @@ export default {
     const kvGet = async (key, defaultVal = null) => {
       if (env.ANIME_KV) {
         const val = await env.ANIME_KV.get(key, "json");
-        return val!== null? val : defaultVal;
+        return val !== null ? val : defaultVal;
       }
       return defaultVal;
     };
@@ -63,44 +68,59 @@ export default {
       }
     };
 
+    // Auto VIP clean
     ctx.waitUntil((async () => {
       if (env.ANIME_KV) {
         let users = (await kvGet("premium_users", [])) || [];
         const now = new Date();
         const validUsers = users.filter(u => new Date(u.expires_at) > now);
-        if (users.length!== validUsers.length) await kvSet("premium_users", validUsers);
+        if (users.length !== validUsers.length) await kvSet("premium_users", validUsers);
       }
     })());
 
-    // Telegram sender - FIXED CAPTION WITH LABELS
+    const extractChannelUsername = (link) => {
+      if (!link) return "hindisubinganime";
+      let l = String(link).trim();
+      l = l.replace(/\/+$/, ""); // remove trailing /
+      // t.me/username or @username
+      const match = l.match(/(?:https?:\/\/)?(?:www\.)?t\.me\/([A-Za-z0-9_]+)/i);
+      if (match && match[1]) return match[1];
+      if (l.startsWith("@")) return l.slice(1);
+      if (l.includes("/")) {
+        const parts = l.split("/").filter(Boolean);
+        const last = parts[parts.length - 1];
+        return last.replace("@", "");
+      }
+      return l.replace("@", "");
+    };
+
     const sendTelegramPost = async (settings, postData, file = null) => {
       const botToken = settings.bot_token || env.TELEGRAM_BOT_TOKEN;
       const chatId = settings.chat_id || env.TELEGRAM_CHAT_ID;
-      if (!botToken ||!chatId) return { ok: false, reason: "Bot Token/Chat ID not set" };
+      if (!botToken || !chatId) return { ok: false, reason: "Bot Token/Chat ID not set" };
+
       const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      let hash = (postData.genres || "").split(/[,.]+/).map(g=>g.trim()).filter(g=>g).map(g=>'#'+g.replace(/\s+/g,'')).join(' ');
+      let hash = (postData.genres || "").split(/[,.]+/).map(g => g.trim()).filter(g => g).map(g => '#' + g.replace(/\s+/g, '')).join(' ');
 
       const channelLink = settings.channel_link || "https://t.me/hindisubinganime";
-      const groupLink = settings.group_link || "https://t.me/hindisubanime_q";
-      const siteLink = settings.site_link || "https://animebox-esr.pages.dev/";
+      const groupLink = settings.group_link || "@ASIgroup";
+      const siteLink = settings.site_link || "https://asif3543.github.io/asi-anime/";
       const instaLink = settings.instagram_link || "";
       const ytLink = settings.youtube_link || "";
 
-      let captionLines = [
-        `Name: <b>${esc(postData.name)}</b> ❞`,
-        `➖➖➖➖➖➖➖➖➖➖➖➖`,
-        `Category:\n<b>${esc(postData.category)}</b> ❞`,
-        `➖➖➖➖➖➖➖➖➖➖➖➖`,
-        `Genre: ${hash}`,
-        `Release: ${esc(postData.release || '-')}`,
-        `➖➖➖➖➖➖➖➖➖➖➖➖`
-      ];
-      if(channelLink) captionLines.push(`📢 Channel: ${esc(channelLink)}`);
-      if(groupLink) captionLines.push(`👥 Group: ${esc(groupLink)}`);
-      if(siteLink) captionLines.push(`🌐 Website: ${esc(siteLink)}`);
-      if(instaLink) captionLines.push(`📸 Instagram: ${esc(instaLink)}`);
-      if(ytLink) captionLines.push(`▶️ YouTube: ${esc(ytLink)}`);
-      const caption = captionLines.join('\n');
+      // New caption format as per spec
+      let captionLines = [];
+      captionLines.push(`Name: <b>${esc(postData.name)}</b>`);
+      captionLines.push(`Category: <b>${esc(postData.category)}</b>`);
+      if (hash) captionLines.push(`Genre: ${hash}`);
+      captionLines.push(`Release: ${esc(postData.release || '-')}`);
+      captionLines.push(`➖➖➖➖➖➖➖➖➖➖`);
+      captionLines.push(`📢 Channel: ${esc(channelLink)}`);
+      captionLines.push(`👥 Group: ${esc(groupLink)}`);
+      captionLines.push(`🌐 Website: ${esc(siteLink)}`);
+      if (instaLink) captionLines.push(`📸 Instagram: ${esc(instaLink)}`);
+      if (ytLink) captionLines.push(`▶️ YouTube: ${esc(ytLink)}`);
+      const caption = captionLines.join("\n");
 
       try {
         const tgForm = new FormData();
@@ -108,30 +128,39 @@ export default {
         tgForm.append("caption", caption);
         tgForm.append("parse_mode", "HTML");
         if (file) tgForm.append("photo", file);
-        else if (postData.image_url && postData.image_url.startsWith("http") &&!postData.image_url.includes("/api/tg-img/")) {
+        else if (postData.image_url && postData.image_url.startsWith("http") && !postData.image_url.includes("/api/tg-img/")) {
           tgForm.append("photo", postData.image_url);
         }
-        const apiUrl = (file || (postData.image_url && postData.image_url.startsWith("http") &&!postData.image_url.includes("/api/tg-img/")))
-         ? `https://api.telegram.org/bot${botToken}/sendPhoto`
+
+        const apiUrl = (file || (postData.image_url && postData.image_url.startsWith("http") && !postData.image_url.includes("/api/tg-img/")))
+          ? `https://api.telegram.org/bot${botToken}/sendPhoto`
           : `https://api.telegram.org/bot${botToken}/sendMessage`;
+
         if (apiUrl.includes("sendMessage")) {
           tgForm.append("text", caption);
-          tgForm.delete("caption"); tgForm.delete("photo");
+          tgForm.delete("caption");
+          tgForm.delete("photo");
         }
+
         const res = await fetch(apiUrl, { method: "POST", body: tgForm });
         const data = await res.json();
         if (!data.ok) return { ok: false, reason: data.description };
+
         let fileId = null;
-        if (data.result.photo) { const best = data.result.photo.pop(); fileId = best.file_id; }
-        // FIX double slash bug
-        let rawChan = (settings.channel_link || "https://t.me/hindisubinganime").trim().replace(/\/+$/, '');
-        let parts = rawChan.split('/').filter(Boolean);
-        let last = (parts.pop() || 'hindisubinganime').replace('@','').split('?')[0];
-        const publicLink = `https://t.me/${last}/${data.result.message_id}`;
+        if (data.result.photo) {
+          const best = data.result.photo.pop();
+          fileId = best.file_id;
+        }
+        const channelUsername = extractChannelUsername(channelLink);
+        const publicLink = `https://t.me/${channelUsername}/${data.result.message_id}`;
+
         return { ok: true, message_id: data.result.message_id, file_id: fileId, public_link: publicLink, result: data.result };
-      } catch (e) { return { ok: false, reason: String(e) }; }
+      } catch (e) {
+        return { ok: false, reason: String(e) };
+      }
     };
 
+    // TG Image Proxy
     if (url.pathname.startsWith("/api/tg-img/")) {
       let fileId = url.pathname.split("/").pop();
       if (fileId.endsWith('.jpg')) fileId = fileId.slice(0, -4);
@@ -139,277 +168,602 @@ export default {
       const userAgent = request.headers.get("User-Agent") || "";
       const isBot = /facebook|whatsapp|telegram|bot|discord/i.test(userAgent);
       const urlHost = new URL(request.url).hostname;
-      if (!isBot && (!referer || (!referer.includes(urlHost) &&!referer.includes("asi-anime")))) {
-         return new Response("Forbidden. Protected Image CDN.", { status: 403 });
+      if (!isBot && (!referer || (!referer.includes(urlHost) && !referer.includes("asi-anime")))) {
+        return new Response("Forbidden. Protected Image CDN.", { status: 403 });
       }
       const settings = (await kvGet("settings", {})) || {};
       const botToken = settings.bot_token || env.TELEGRAM_BOT_TOKEN;
       if (!botToken) return new Response("Bot not set", { status: 400 });
       try {
-        const fi = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`).then(r=>r.json());
+        const fi = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`).then(r => r.json());
         if (!fi.ok) return new Response("File not found", { status: 404 });
         const imgRes = await fetch(`https://api.telegram.org/file/bot${botToken}/${fi.result.file_path}`);
         return new Response(imgRes.body, {
           headers: { "Content-Type": "image/jpeg", "Cache-Control": "public, max-age=31536000", "Access-Control-Allow-Origin": "*" }
         });
-      } catch (e) { return new Response("Error", { status: 500 }); }
+      } catch (e) {
+        return new Response("Error", { status: 500 });
+      }
     }
 
     if (url.pathname === "/manifest.json") {
-      const manifest = { name: "ASI Animes", short_name: "ASI Animes", description: "Watch anime", start_url: "/", display: "standalone", background_color: "#05080c", theme_color: "#00ff66", icons: [{ src: "https://placehold.co/192x192/05080c/00ff66.png?text=AB", sizes: "192x192", type: "image/png" }, { src: "https://placehold.co/512x512/05080c/00ff66.png?text=AB", sizes: "512x512", type: "image/png" }] };
+      const manifest = {
+        name: "ASI Animes - Ultimate Anime Portal",
+        short_name: "ASI Animes",
+        description: "Watch and download high-definition anime, dramas, and movies.",
+        start_url: "/",
+        display: "standalone",
+        background_color: "#05080c",
+        theme_color: "#00ff66",
+        icons: [
+          { src: "https://placehold.co/192x192/05080c/00ff66.png?text=AB", sizes: "192x192", type: "image/png" },
+          { src: "https://placehold.co/512x512/05080c/00ff66.png?text=AB", sizes: "512x512", type: "image/png" }
+        ]
+      };
       return new Response(JSON.stringify(manifest), { headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Access-Control-Allow-Origin": "*" } });
     }
+
     if (url.pathname === "/sw.js") {
-      const swScript = `const CACHE_NAME='animebox-pwa-v11';self.addEventListener('install',e=>{self.skipWaiting()});self.addEventListener('fetch',e=>{if(e.request.method!=='GET'||e.request.url.includes('/api/'))return;});`;
+      const swScript = `const CACHE_NAME='animebox-pwa-v12';const STATIC_ASSETS=['/','/manifest.json','https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css'];self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE_NAME).then(c=>c.addAll(STATIC_ASSETS)));self.skipWaiting()});self.addEventListener('activate',e=>{self.clients.claim()});self.addEventListener('fetch',e=>{if(e.request.method!=='GET'||e.request.url.includes('/api/')||e.request.url.match(/\\.(mp4|m3u8|ts)$/i))return;e.respondWith(caches.match(e.request).then(c=>{return fetch(e.request).then(r=>{if(r&&r.status===200&&e.request.url.startsWith('http')){const rc=r.clone();caches.open(CACHE_NAME).then(cache=>cache.put(e.request,rc));}return r}).catch(()=>c)}))});`;
       return new Response(swScript, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Service-Worker-Allowed": "/" } });
     }
-    if (url.pathname === "/robots.txt") return new Response(`User-agent: *\nAllow: /\nSitemap: https://${url.hostname}/sitemap.xml`, { headers: { "Content-Type": "text/plain" } });
-    if (url.pathname === "/sitemap.xml") {
-      try{
-        const {results} = await env.ANIME_DB.prepare("SELECT id, updatedAt FROM posts ORDER BY updatedAt DESC").all();
-        let urls = results.map(p => `<url><loc>https://${url.hostname}/?id=${p.id}</loc><lastmod>${new Date(p.updatedAt).toISOString()}</lastmod></url>`).join('');
-        let xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}</urlset>`;
-        return new Response(xml, { headers: { "Content-Type": "application/xml" } });
-      }catch(e){ return new Response('', {headers:{"Content-Type":"application/xml"}}); }
+
+    if (url.pathname === "/robots.txt") {
+      return new Response(`User-agent: *\nAllow: /\nSitemap: https://${url.hostname}/sitemap.xml`, { headers: { "Content-Type": "text/plain" } });
     }
 
-    // API - POSTS NOW FROM D1
+    if (url.pathname === "/sitemap.xml") {
+      try {
+        const { results } = await env.ANIME_DB.prepare("SELECT id, updatedAt FROM posts ORDER BY updatedAt DESC LIMIT 5000").all();
+        let urls = (results || []).map(p => `<url><loc>https://${url.hostname}/?id=${p.id}</loc><lastmod>${new Date(p.updatedAt).toISOString()}</lastmod></url>`).join('');
+        let cats = ["anime-sub", "anime-dub", "k-drama", "movie"];
+        let catUrls = cats.map(c => `<url><loc>https://${url.hostname}/category/${c}</loc></url>`).join('');
+        let xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}${catUrls}</urlset>`;
+        return new Response(xml, { headers: { "Content-Type": "application/xml" } });
+      } catch (e) {
+        return new Response(`<?xml version="1.0"?><urlset></urlset>`, { headers: { "Content-Type": "application/xml" } });
+      }
+    }
+
+    // ================= API =================
+
     if (url.pathname === "/api/data" && method === "GET") {
+      if (!env.ANIME_DB) return json({ error: "D1 ANIME_DB not bound" }, 500);
       const settings = (await kvGet("settings", { site_name: "ASI Animes", channel_link: "https://t.me/hindisubinganime" })) || {};
+
       const safeSettings = {
-        channel_link: settings.channel_link, group_link: settings.group_link, site_link: settings.site_link,
-        instagram_link: settings.instagram_link, youtube_link: settings.youtube_link,
-        ad_head: settings.ad_head, ad_body: settings.ad_body, ad_banner: settings.ad_banner, apk_link: settings.apk_link
+        channel_link: settings.channel_link,
+        group_link: settings.group_link,
+        site_link: settings.site_link,
+        instagram_link: settings.instagram_link || "",
+        youtube_link: settings.youtube_link || "",
+        ad_head: settings.ad_head,
+        ad_body: settings.ad_body,
+        ad_banner: settings.ad_banner,
+        apk_link: settings.apk_link
       };
-      if (await isAdmin()) {
-        try{
-          const {results} = await env.ANIME_DB.prepare("SELECT * FROM posts ORDER BY updatedAt DESC").all();
+
+      const isAdminReq = await isAdmin();
+
+      // Admin: SELECT * ORDER BY updatedAt DESC
+      if (isAdminReq) {
+        try {
+          const { results: posts } = await env.ANIME_DB.prepare("SELECT * FROM posts ORDER BY updatedAt DESC").all();
+          const { results: catRows } = await env.ANIME_DB.prepare("SELECT DISTINCT category FROM posts WHERE category IS NOT NULL AND category != '' ORDER BY category").all();
+          const cats = (catRows || []).map(r => r.category).filter(Boolean);
+          const { results: genreRows } = await env.ANIME_DB.prepare("SELECT genres FROM posts").all();
+          let allGenresSet = new Set();
+          (genreRows || []).forEach(r => {
+            (r.genres || "").split(/[,.]+/).forEach(g => { if (g.trim()) allGenresSet.add(g.trim()); });
+          });
+          const genres = Array.from(allGenresSet);
+
           const shorteners = (await kvGet("shorteners", [])) || [];
           const paid_requests = (await kvGet("paid_requests", [])) || [];
-          return json({ posts: results || [], settings, shorteners, paid_requests, admin: true });
-        }catch(e){ return json({ posts: [], settings, shorteners:[], paid_requests:[], admin:true }); }
+          return json({ posts: posts || [], settings, shorteners, paid_requests, admin: true, cats, genres });
+        } catch (e) {
+          return json({ error: "D1 Error: " + String(e) }, 500);
+        }
       }
+
+      // User path with pagination
       let page = parseInt(url.searchParams.get("page")) || 1;
       let limit = parseInt(url.searchParams.get("limit")) || 30;
-      let search = (url.searchParams.get("search") || "").toLowerCase();
+      let search = (url.searchParams.get("search") || "").trim();
       let cat = url.searchParams.get("cat") || "ALL";
       let gen = url.searchParams.get("gen") || "ALL";
-      let where = []; let params = [];
-      if (cat!== "ALL") { where.push("category =?"); params.push(cat); }
-      if (gen!== "ALL") { where.push("genres LIKE?"); params.push(`%${gen}%`); }
-      if (search) { where.push("(LOWER(name) LIKE? OR LOWER(genres) LIKE? OR LOWER(category) LIKE?)"); params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
-      let whereClause = where.length? "WHERE " + where.join(" AND ") : "";
-      try{
-        const countRes = await env.ANIME_DB.prepare(`SELECT COUNT(*) as total FROM posts ${whereClause}`).bind(...params).first();
-        let total = countRes?.total || 0;
-        let offset = (page-1)*limit;
-        const {results} = await env.ANIME_DB.prepare(`SELECT * FROM posts ${whereClause} ORDER BY updatedAt DESC LIMIT? OFFSET?`).bind(...params, limit, offset).all();
+
+      let where = [];
+      let params = [];
+
+      if (cat !== "ALL") {
+        where.push("category = ?");
+        params.push(cat);
+      }
+      if (gen !== "ALL") {
+        where.push("genres LIKE ?");
+        params.push(`%${gen}%`);
+      }
+      if (search) {
+        where.push("(name LIKE ? OR genres LIKE ? OR category LIKE ?)");
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      }
+
+      const whereSQL = where.length ? "WHERE " + where.join(" AND ") : "";
+
+      try {
+        // total count
+        const countStmt = env.ANIME_DB.prepare(`SELECT COUNT(*) as total FROM posts ${whereSQL}`);
+        const countRes = await countStmt.bind(...params).first();
+        const total = countRes ? countRes.total : 0;
+
+        // paginated posts
+        const offset = (page - 1) * limit;
+        const dataStmt = env.ANIME_DB.prepare(`SELECT * FROM posts ${whereSQL} ORDER BY updatedAt DESC LIMIT ? OFFSET ?`);
+        const { results } = await dataStmt.bind(...params, limit, offset).all();
+
         // cats
-        const catRows = await env.ANIME_DB.prepare("SELECT DISTINCT category FROM posts WHERE category IS NOT NULL AND category!= '' ORDER BY category ASC").all();
-        let cats = (catRows.results || []).map(r=>r.category);
-        // genres for current category filter
-        let genreWhere = []; let genreParams = [];
-        if (cat!== "ALL") { genreWhere.push("category =?"); genreParams.push(cat); }
-        let genreWhereClause = genreWhere.length? "WHERE " + genreWhere.join(" AND ") : "";
-        const genreRows = await env.ANIME_DB.prepare(`SELECT genres FROM posts ${genreWhereClause}`).bind(...genreParams).all();
-        let allGenresSet = new Set();
-        (genreRows.results||[]).forEach(r=> (r.genres||"").split(/[,.]+/).forEach(g=>{ if(g.trim()) allGenresSet.add(g.trim()); }));
-        let genres = Array.from(allGenresSet).sort();
-        return json({ posts: results||[], total, hasMore: page*limit < total, settings: safeSettings, cats, genres });
-      }catch(e){ return json({ posts:[], total:0, hasMore:false, settings: safeSettings, cats:[], genres:[] }); }
+        const { results: catRows } = await env.ANIME_DB.prepare("SELECT DISTINCT category FROM posts WHERE category IS NOT NULL AND category != '' ORDER BY category").all();
+        const cats = (catRows || []).map(r => r.category).filter(Boolean);
+
+        // genres filtered by category as per spec
+        let genreRows;
+        if (cat !== "ALL") {
+          const gStmt = env.ANIME_DB.prepare("SELECT genres FROM posts WHERE category = ?");
+          const gRes = await gStmt.bind(cat).all();
+          genreRows = gRes.results;
+        } else {
+          const gRes = await env.ANIME_DB.prepare("SELECT genres FROM posts").all();
+          genreRows = gRes.results;
+        }
+        let genreSet = new Set();
+        (genreRows || []).forEach(r => {
+          (r.genres || "").split(/[,.]+/).forEach(g => { if (g.trim()) genreSet.add(g.trim()); });
+        });
+        const genres = Array.from(genreSet).sort();
+
+        return json({
+          posts: results || [],
+          total,
+          hasMore: offset + limit < total,
+          settings: safeSettings,
+          cats,
+          genres
+        });
+      } catch (e) {
+        return json({ error: "D1 Error: " + String(e), posts: [], total: 0, hasMore: false }, 500);
+      }
     }
 
     if (url.pathname === "/api/post" && method === "GET") {
       const id = url.searchParams.get("id");
-      try{
-        const post = await env.ANIME_DB.prepare("SELECT * FROM posts WHERE id =?").bind(id).first();
+      if (!env.ANIME_DB) return json({ error: "D1 not bound" }, 500);
+      try {
+        const post = await env.ANIME_DB.prepare("SELECT * FROM posts WHERE id = ?").bind(id).first();
         if (post) return json(post);
-      }catch(e){}
-      return json({ error: "Not found" }, 404);
+        return json({ error: "Not found" }, 404);
+      } catch (e) {
+        return json({ error: "D1 Error" }, 500);
+      }
     }
 
     if (url.pathname === "/api/posts" && method === "POST") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
+      if (!env.ANIME_DB) return json({ error: "D1 not bound" }, 500);
+
       let body = {}, file = null;
       const ct = request.headers.get("content-type") || "";
       if (ct.includes("multipart/form-data") || ct.includes("form-data")) {
         const fd = await request.formData();
         file = fd.get("file");
-        body.name = fd.get("name") || "Untitled"; body.category = fd.get("category") || "Uncategorized";
-        body.genres = fd.get("genres") || ""; body.release = fd.get("release") || "";
-        body.image_url = fd.get("image_url") || ""; body.id = fd.get("id") || "";
-      } else { body = await request.json(); }
+        body.name = fd.get("name") || "Untitled";
+        body.category = fd.get("category") || "Uncategorized";
+        body.genres = fd.get("genres") || "";
+        body.release = fd.get("release") || "";
+        body.image_url = fd.get("image_url") || "";
+        body.id = fd.get("id") || "";
+      } else {
+        body = await request.json();
+      }
+
       const settings = (await kvGet("settings", {})) || {};
-      let finalImageUrl = body.image_url || ""; let tgFileId = null; let tgPublicLink = null; let tgMsgId = null;
+      let finalImageUrl = body.image_url || "";
+      let tgFileId = null;
+      let tgPublicLink = null;
+      let tgMsgId = null;
+
       if (file && file.size > 0) {
         const tg = await sendTelegramPost(settings, body, file);
         if (!tg.ok) return json({ error: "Telegram: " + tg.reason }, 400);
-        tgFileId = tg.file_id; tgPublicLink = tg.public_link; tgMsgId = tg.message_id;
-        finalImageUrl = tg.file_id? `/api/tg-img/${tg.file_id}.jpg` : body.image_url;
+        tgFileId = tg.file_id;
+        tgPublicLink = tg.public_link;
+        tgMsgId = tg.message_id;
+        finalImageUrl = tg.file_id ? `/api/tg-img/${tg.file_id}.jpg` : body.image_url;
       }
+
+      const newId = body.id || "p_" + Date.now();
       const newPost = {
-        id: body.id || "p_" + Date.now(), name: body.name || "Untitled",
-        image_url: finalImageUrl || body.image_url || "", tg_file_id: tgFileId,
-        telegram_url: tgPublicLink, telegram_id: tgMsgId,
-        category: body.category || "Uncategorized", genres: body.genres || "",
-        release: body.release || "", updatedAt: Date.now()
+        id: newId,
+        name: body.name || "Untitled",
+        image_url: finalImageUrl || body.image_url || "",
+        tg_file_id: tgFileId,
+        telegram_url: tgPublicLink,
+        telegram_id: tgMsgId,
+        category: body.category || "Uncategorized",
+        genres: body.genres || "",
+        release: body.release || "",
+        updatedAt: Date.now()
       };
-      try{
-        await env.ANIME_DB.prepare("INSERT OR REPLACE INTO posts (id, name, image_url, tg_file_id, telegram_url, telegram_id, category, genres, release, updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?)")
-         .bind(newPost.id, newPost.name, newPost.image_url, newPost.tg_file_id, newPost.telegram_url, newPost.telegram_id, newPost.category, newPost.genres, newPost.release, newPost.updatedAt).run();
-      }catch(e){ return json({ error: "D1 Error: "+String(e) }, 500); }
+
+      // INSERT OR REPLACE
+      try {
+        await env.ANIME_DB.prepare(
+          `INSERT OR REPLACE INTO posts (id, name, image_url, tg_file_id, telegram_url, telegram_id, category, genres, release, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          newPost.id, newPost.name, newPost.image_url, newPost.tg_file_id, newPost.telegram_url, newPost.telegram_id, newPost.category, newPost.genres, newPost.release, newPost.updatedAt
+        ).run();
+      } catch (e) {
+        return json({ error: "D1 Insert Error: " + String(e) }, 500);
+      }
+
       let telegramResult = { ok: true, public_link: tgPublicLink };
       if (!file) {
         const tg2 = await sendTelegramPost(settings, newPost, null);
         telegramResult = tg2;
         if (tg2.ok) {
-          newPost.telegram_url = tg2.public_link; newPost.telegram_id = tg2.message_id;
-          if (tg2.file_id) { newPost.tg_file_id = tg2.file_id; newPost.image_url = `/api/tg-img/${tg2.file_id}.jpg`; }
-          try{
-            await env.ANIME_DB.prepare("UPDATE posts SET image_url=?, tg_file_id=?, telegram_url=?, telegram_id=? WHERE id=?")
-             .bind(newPost.image_url, newPost.tg_file_id, newPost.telegram_url, newPost.telegram_id, newPost.id).run();
-          }catch(e){}
+          newPost.telegram_url = tg2.public_link;
+          newPost.telegram_id = tg2.message_id;
+          if (tg2.file_id) {
+            newPost.tg_file_id = tg2.file_id;
+            newPost.image_url = `/api/tg-img/${tg2.file_id}.jpg`;
+          }
+          try {
+            await env.ANIME_DB.prepare(
+              `INSERT OR REPLACE INTO posts (id, name, image_url, tg_file_id, telegram_url, telegram_id, category, genres, release, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(
+              newPost.id, newPost.name, newPost.image_url, newPost.tg_file_id, newPost.telegram_url, newPost.telegram_id, newPost.category, newPost.genres, newPost.release, newPost.updatedAt
+            ).run();
+          } catch (e) { }
         }
       }
+
       return json({ success: true, post: newPost, telegram: telegramResult });
     }
 
     if (url.pathname.startsWith("/api/posts/") && method === "DELETE") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
       const id = url.pathname.split("/").pop();
-      try{ await env.ANIME_DB.prepare("DELETE FROM posts WHERE id =?").bind(id).run(); }catch(e){}
-      try{ await env.ANIME_DB.prepare("DELETE FROM episodes WHERE post_id =?").bind(id).run(); }catch(e){}
+      try {
+        await env.ANIME_DB.prepare("DELETE FROM posts WHERE id = ?").bind(id).run();
+        await env.ANIME_DB.prepare("DELETE FROM episodes WHERE post_id = ?").bind(id).run();
+      } catch (e) { console.log(e) }
       return json({ success: true });
     }
 
     if (url.pathname === "/api/episodes" && method === "GET") {
       const postId = url.searchParams.get("post_id");
-      try{ const { results } = await env.ANIME_DB.prepare("SELECT * FROM episodes WHERE post_id =? ORDER BY created_at ASC").bind(postId).all(); return json({ episodes: results || [] }); }catch(e){ return json({ episodes: [] }); }
+      if (!env.ANIME_DB) return json({ episodes: [] });
+      try {
+        const { results } = await env.ANIME_DB.prepare("SELECT * FROM episodes WHERE post_id = ? ORDER BY created_at ASC").bind(postId).all();
+        return json({ episodes: results || [] });
+      } catch (err) {
+        return json({ episodes: [] });
+      }
     }
+
     if (url.pathname === "/api/episodes" && method === "POST") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
       const body = await request.json();
-      const newEp = { id: body.id || "ep_" + Date.now(), post_id: body.post_id, season: body.season || "", label: body.label || "01", quality: body.quality || "HD", play_link: body.play_link || "", download_link: body.download_link || "", created_at: Date.now() };
-      try{ await env.ANIME_DB.prepare("INSERT INTO episodes (id, post_id, season, label, quality, play_link, download_link, created_at) VALUES (?,?,?,?,?,?,?,?)")
-         .bind(newEp.id, newEp.post_id, newEp.season, newEp.label, newEp.quality, newEp.play_link, newEp.download_link, newEp.created_at).run(); }catch(e){ return json({ error: "D1 DB Error" }, 500); }
+      const newEp = {
+        id: body.id || "ep_" + Date.now(),
+        post_id: body.post_id,
+        season: body.season || "",
+        label: body.label || "01",
+        quality: body.quality || "HD",
+        play_link: body.play_link || "",
+        download_link: body.download_link || "",
+        created_at: Date.now()
+      };
+      try {
+        await env.ANIME_DB.prepare("INSERT INTO episodes (id, post_id, season, label, quality, play_link, download_link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          .bind(newEp.id, newEp.post_id, newEp.season, newEp.label, newEp.quality, newEp.play_link, newEp.download_link, newEp.created_at).run();
+      } catch (e) {
+        return json({ error: "D1 DB Error: " + String(e) }, 500);
+      }
       return json({ success: true, episode: newEp });
     }
+
     if (url.pathname.startsWith("/api/episodes/") && method === "DELETE") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
       const epId = url.pathname.split("/").pop();
-      try{ await env.ANIME_DB.prepare("DELETE FROM episodes WHERE id =?").bind(epId).run(); }catch(e){}
+      try {
+        await env.ANIME_DB.prepare("DELETE FROM episodes WHERE id = ?").bind(epId).run();
+      } catch (e) { }
       return json({ success: true });
     }
 
     if (url.pathname === "/api/admin/vip" && method === "GET") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
-      let users = (await kvGet("premium_users", [])) || []; const now = new Date();
+      let users = (await kvGet("premium_users", [])) || [];
+      const now = new Date();
       const validUsers = users.filter(u => new Date(u.expires_at) > now);
-      if (users.length!== validUsers.length) await kvSet("premium_users", validUsers);
+      if (users.length !== validUsers.length) await kvSet("premium_users", validUsers);
       return json({ users: validUsers });
     }
+
     if (url.pathname.startsWith("/api/admin/vip/") && method === "DELETE") {
       if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
       const email = decodeURIComponent(url.pathname.split("/").pop());
-      let users = (await kvGet("premium_users", [])) || []; users = users.filter(u => u.email!== email);
-      await kvSet("premium_users", users); return json({ success: true });
-    }
-    if (url.pathname === "/api/get-link") {
-      const epId = url.searchParams.get("ep_id"); const userKey = url.searchParams.get("key"); const deviceId = url.searchParams.get("device_id");
-      let ep = null; try{ const { results } = await env.ANIME_DB.prepare("SELECT * FROM episodes WHERE id =?").bind(epId).all(); if (results && results.length > 0) ep = results[0]; }catch(e){}
-      if (!ep) return json({ error: "Episode not found" }, 404);
-      const targetUrl = ep.download_link || ep.play_link; if (!targetUrl) return json({ error: "Empty link" }, 400);
-      let isPremium = false; const premiumUsers = (await kvGet("premium_users", [])) || [];
-      if (userKey) { const user = premiumUsers.find(u => u.key === userKey || u.email === userKey); if (user && new Date(user.expires_at) > new Date()) { isPremium = true; if (deviceId) { if (!user.device_id) { user.device_id = deviceId; await kvSet("premium_users", premiumUsers); } else if (user.device_id!== deviceId) isPremium = false; } } }
-      if (isPremium) return json({ direct: true, url: targetUrl, premium: true });
-      const shorteners = (await kvGet("shorteners", [])) || []; let activeShorteners = shorteners;
-      if (activeShorteners.length === 0) { const s = (await kvGet("settings", {})) || {}; if (s.shorteners && s.shorteners.length > 0) activeShorteners = s.shorteners; }
-      if (activeShorteners.length > 0) {
-        const extractShortUrl = (raw) => {
-          if (!raw) return null; const t = raw.trim(); if (t.startsWith("http")) return t;
-          try{ const j = JSON.parse(t); const cand = j.shortenedUrl || j.short_url || j.shortUrl || j.url || j.link || j.data || j.result; if (typeof cand === "string" && cand.startsWith("http")) return cand; }catch(e){}
-          const m = t.match(/https?:\/\/[^\s"']+/); return m? m[0] : null;
-        };
-        try{
-          const rawDomain = activeShorteners[0].domain || ""; const domain = rawDomain.replace(/^(https?:\/\/)?(www\.)?/, "").replace(/\/$/, "").split("/")[0];
-          const apiKey = activeShorteners[0].api_key; const enc = encodeURIComponent(targetUrl);
-          const apiDomain = domain.startsWith("api.")? domain : "api." + domain;
-          const apiUrl = `https://${apiDomain}/api?api=${apiKey}&url=${enc}&format=text`;
-          const r = await fetch(apiUrl); const txt = await r.text(); const shortLink = extractShortUrl(txt);
-          if (shortLink) return json({ direct: false, url: shortLink, shortener: domain });
-        }catch(e){}
-        return json({ error: "Shortener busy, try again" }, 500);
-      }
-      return json({ direct: true, url: targetUrl });
-    }
-    if (url.pathname === "/api/decrypt-link") {
-      const code = url.searchParams.get("code"); const paidRequests = (await kvGet("paid_requests", [])) || [];
-      const item = paidRequests.find(r => r.password === code); if (item) return json({ success: true, url: item.original_link });
-      return json({ success: false, message: "Invalid or expired key" }, 404);
-    }
-    if (url.pathname === "/api/premium" && method === "POST") {
-      if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
-      const body = await request.json(); let users = (await kvGet("premium_users", [])) || [];
-      const expiry = new Date(); expiry.setDate(expiry.getDate() + parseInt(body.days || 30));
-      const newUser = { id: "usr_" + Date.now(), email: body.email.toLowerCase().trim(), key: body.key.trim(), expires_at: expiry.toISOString(), device_id: null };
-      users = users.filter(u => u.email!== newUser.email && u.key!== newUser.key); users.unshift(newUser); await kvSet("premium_users", users);
-      return json({ success: true, user: newUser });
-    }
-    if (url.pathname === "/api/settings" && method === "POST") {
-      if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
-      const body = await request.json(); const oldSettings = (await kvGet("settings", {})) || {}; const mergedSettings = {...oldSettings };
-      if (body.settings) { for (const [key, value] of Object.entries(body.settings)) { if (value!== undefined) mergedSettings[key] = value; } await kvSet("settings", mergedSettings); }
-      if (body.shorteners!== undefined) { await kvSet("shorteners", body.shorteners); mergedSettings.shorteners = body.shorteners; }
-      if (body.paid_requests!== undefined) await kvSet("paid_requests", body.paid_requests);
+      let users = (await kvGet("premium_users", [])) || [];
+      users = users.filter(u => u.email !== email);
+      await kvSet("premium_users", users);
       return json({ success: true });
     }
 
-    const siteSettings = (await kvGet("settings", {})) || {};
-    let seoPost = null;
-    if (url.searchParams.has("id")) {
-      try{ seoPost = await env.ANIME_DB.prepare("SELECT * FROM posts WHERE id =?").bind(url.searchParams.get("id")).first(); }catch(e){}
+    if (url.pathname === "/api/get-link") {
+      const epId = url.searchParams.get("ep_id");
+      const userKey = url.searchParams.get("key");
+      const deviceId = url.searchParams.get("device_id");
+      let ep = null;
+      try {
+        ep = await env.ANIME_DB.prepare("SELECT * FROM episodes WHERE id = ?").bind(epId).first();
+      } catch (e) { }
+      if (!ep) return json({ error: "Episode not found" }, 404);
+      const targetUrl = ep.download_link || ep.play_link;
+      if (!targetUrl) return json({ error: "Empty link" }, 400);
+
+      let isPremium = false;
+      const premiumUsers = (await kvGet("premium_users", [])) || [];
+      if (userKey) {
+        const user = premiumUsers.find(u => u.key === userKey || u.email === userKey);
+        if (user && new Date(user.expires_at) > new Date()) {
+          isPremium = true;
+          if (deviceId) {
+            if (!user.device_id) { user.device_id = deviceId; await kvSet("premium_users", premiumUsers); }
+            else if (user.device_id !== deviceId) isPremium = false;
+          }
+        }
+      }
+      if (isPremium) return json({ direct: true, url: targetUrl, premium: true });
+
+      const shorteners = (await kvGet("shorteners", [])) || [];
+      let activeShorteners = shorteners;
+      if (activeShorteners.length === 0) {
+        const s = (await kvGet("settings", {})) || {};
+        if (s.shorteners && s.shorteners.length > 0) activeShorteners = s.shorteners;
+      }
+      if (activeShorteners.length > 0) {
+        const extractShortUrl = (raw) => {
+          if (!raw) return null;
+          const t = raw.trim();
+          if (t.startsWith("http")) return t;
+          try {
+            const j = JSON.parse(t);
+            const cand = j.shortenedUrl || j.short_url || j.shortUrl || j.url || j.link || j.data || j.result;
+            if (typeof cand === "string" && cand.startsWith("http")) return cand;
+            if (j.data && typeof j.data === "object") {
+              const inner = j.data.url || j.data.short_url;
+              if (inner && inner.startsWith("http")) return inner;
+            }
+          } catch (e) { }
+          const m = t.match(/https?:\/\/[^\s"']+/);
+          return m ? m[0] : null;
+        };
+        try {
+          const rawDomain = activeShorteners[Math.floor(Math.random() * activeShorteners.length)].domain || activeShorteners[0].domain || "";
+          const domain = rawDomain.replace(/^(https?:\/\/)?(www\.)?/, "").replace(/\/$/, "").split("/")[0];
+          const apiKey = (activeShorteners[0].api_key || activeShorteners[0].apiKey);
+          const enc = encodeURIComponent(targetUrl);
+          const apiDomain = domain.startsWith("api.") ? domain : "api." + domain;
+          const tryDomains = [...new Set([apiDomain, domain])];
+          const attempts = [];
+          tryDomains.forEach(d => {
+            attempts.push(`https://${d}/api?api=${apiKey}&url=${enc}&format=text`);
+            attempts.push(`https://${d}/api?api=${apiKey}&url=${enc}`);
+          });
+          const fetchOptions = {
+            method: 'GET',
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "application/json, text/plain, */*"
+            }
+          };
+          for (const apiUrl of attempts) {
+            try {
+              const r = await fetch(apiUrl, fetchOptions);
+              const txt = await r.text();
+              const shortLink = extractShortUrl(txt);
+              if (shortLink) return json({ direct: false, url: shortLink, shortener: domain });
+            } catch (e) { }
+          }
+          try {
+            const pr = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(attempts[0])}`);
+            const pd = await pr.json();
+            const sl = pd.contents ? extractShortUrl(pd.contents) : null;
+            if (sl) return json({ direct: false, url: sl, via: "proxy" });
+          } catch (e) { }
+        } catch (err) { }
+        return json({ error: "Shortener service is currently busy or down. Please try again in 5 minutes." }, 500);
+      }
+      return json({ direct: true, url: targetUrl });
     }
+
+    if (url.pathname === "/api/decrypt-link") {
+      const code = url.searchParams.get("code");
+      const paidRequests = (await kvGet("paid_requests", [])) || [];
+      const item = paidRequests.find(r => r.password === code);
+      if (item) return json({ success: true, url: item.original_link });
+      return json({ success: false, message: "Invalid or expired key" }, 404);
+    }
+
+    if (url.pathname === "/api/premium" && method === "POST") {
+      if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
+      const body = await request.json();
+      let users = (await kvGet("premium_users", [])) || [];
+      const expiry = new Date();
+      expiry.setDate(expiry.getDate() + parseInt(body.days || 30));
+      const newUser = {
+        id: "usr_" + Date.now(),
+        email: body.email.toLowerCase().trim(),
+        key: body.key.trim(),
+        expires_at: expiry.toISOString(),
+        device_id: null
+      };
+      users = users.filter(u => u.email !== newUser.email && u.key !== newUser.key);
+      users.unshift(newUser);
+      await kvSet("premium_users", users);
+      const settings = (await kvGet("settings", {})) || {};
+      const tgMsg = `💎 <b>New VIP Pass Activated!</b>\n\n📧 <b>Email:</b> ${newUser.email}\n🔑 <b>Key:</b> ${newUser.key}\n⏳ <b>Expires:</b> ${expiry.toLocaleString()}`;
+      ctx.waitUntil((async () => {
+        const bot = settings.bot_token || env.TELEGRAM_BOT_TOKEN;
+        const chat = settings.chat_id || env.TELEGRAM_CHAT_ID;
+        if (bot && chat) {
+          await fetch(`https://api.telegram.org/bot${bot}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chat, text: tgMsg, parse_mode: "HTML" }) });
+        }
+      })());
+      return json({ success: true, user: newUser });
+    }
+
+    if (url.pathname === "/api/settings" && method === "POST") {
+      if (!(await isAdmin())) return json({ error: "Unauthorized" }, 401);
+      const body = await request.json();
+      const oldSettings = (await kvGet("settings", {})) || {};
+      const mergedSettings = { ...oldSettings };
+      if (body.settings) {
+        for (const [key, value] of Object.entries(body.settings)) {
+          if (value !== undefined) mergedSettings[key] = value;
+        }
+        await kvSet("settings", mergedSettings);
+      }
+      if (body.shorteners !== undefined) {
+        await kvSet("shorteners", body.shorteners);
+        mergedSettings.shorteners = body.shorteners;
+      }
+      if (body.paid_requests !== undefined) {
+        await kvSet("paid_requests", body.paid_requests);
+      }
+      return json({ success: true });
+    }
+
+    // Server HTML Render - Dynamic SEO
+    let seoPost = null;
+    try {
+      if (url.searchParams.has("id") && env.ANIME_DB) {
+        seoPost = await env.ANIME_DB.prepare("SELECT * FROM posts WHERE id = ?").bind(url.searchParams.get("id")).first();
+      }
+    } catch (e) { }
+    const siteSettings = (await kvGet("settings", {})) || {};
     const origin = url.origin;
-    return new Response(renderFullAppHTML(siteSettings, seoPost, origin), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
+    return new Response(renderFullAppHTML(siteSettings, seoPost, origin), {
+      headers: { "Content-Type": "text/html;charset=UTF-8" }
+    });
   }
 };
 
 function renderFullAppHTML(settings, post, origin) {
-  const adHead = settings.ad_head || ''; const adBody = settings.ad_body || ''; const adBanner = settings.ad_banner || ''; const apkLink = settings.apk_link || '';
-  const pageTitle = post? post.name + " Hindi Dubbed | ASI Animes" : "ASI Animes | Watch Hindi Sub & Hindi Dub Anime Online";
-  const pageDesc = post? post.name + " Hindi Dubbed Download." : "Best website to watch Hindi Sub Anime";
-  const ogImg = post? (post.tg_file_id? origin + '/api/tg-img/' + post.tg_file_id + '.jpg' : post.image_url) : origin + "/favicon.png";
+  const adHead = settings.ad_head || '';
+  const adBody = settings.ad_body || '';
+  const adBanner = settings.ad_banner || '';
+  const apkLink = settings.apk_link || '';
+
+  const pageTitle = post ? post.name + " Hindi Dubbed | ASI Animes" : "ASI Animes | Watch Hindi Sub & Hindi Dub Anime Online";
+  const pageDesc = post ? post.name + " Hindi Dubbed Download. Watch " + post.name + " in Hindi Sub/Dub." : "Best website to watch Hindi Sub Anime, Hindi Dub Anime, K-Drama Hindi";
+  const ogImg = post ? (post.tg_file_id ? origin + '/api/tg-img/' + post.tg_file_id + '.jpg' : post.image_url) : origin + "/favicon.png";
+
   return `<!DOCTYPE html>
 <html lang="hi">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>${pageTitle}</title><meta name="description" content="${pageDesc}"><meta name="theme-color" content="#00ff66">
-<meta property="og:title" content="${post? post.name : 'ASI Animes'}"><meta property="og:description" content="${pageDesc}"><meta property="og:image" content="${ogImg}">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>${pageTitle}</title>
+<meta name="description" content="${pageDesc}">
+<meta name="keywords" content="Asi anime, Hindi sub anime, Hindi dubb anime, K drama hindi, ${post ? post.genres : ''}">
+<meta name="theme-color" content="#00ff66">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta property="og:title" content="${post ? post.name : 'ASI Animes'}">
+<meta property="og:description" content="${pageDesc}">
+<meta property="og:image" content="${ogImg}">
+<meta property="og:type" content="website">
+<link rel="manifest" href="/manifest.json">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 ${adHead}
 <style>
 :root{--bg:#05080c;--card:#0d121c;--card-hover:#141b29;--primary:#00ff66;--accent:#00f2fe;--text:#f0fdf4;--text-muted:#94a3b8;--border:rgba(0,255,102,0.15);--gradient:linear-gradient(135deg,#00ff66 0%,#00f2fe 100%);--glow:rgba(0,255,102,0.2);}
-*{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',system-ui,sans-serif;-webkit-tap-highlight-color:transparent;}
-body{background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;padding-bottom:75px;}
+*{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;-webkit-tap-highlight-color:transparent;}
+body{background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;padding-bottom:80px;}
 header{position:sticky;top:0;z-index:100;background:rgba(5,8,12,0.9);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
-.brand{font-size:22px;font-weight:900;background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;cursor:pointer;}
-.search-box{flex:1;max-width:380px;position:relative;}.search-box input{width:100%;padding:8px 14px 8px 36px;background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:20px;color:#fff;font-size:13px;outline:none;}.search-box i{position:absolute;left:12px;top:10px;color:var(--text-muted);font-size:13px;}
+.brand{font-size:22px;font-weight:900;background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;cursor:pointer;letter-spacing:1px;}
+.search-box{flex:1;max-width:380px;position:relative;}
+.search-box input{width:100%;padding:8px 14px 8px 36px;background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:20px;color:#fff;font-size:13px;outline:none;}
+.search-box input:focus{border-color:var(--primary);box-shadow:0 0 10px var(--glow);}
+.search-box i{position:absolute;left:12px;top:10px;color:var(--text-muted);font-size:13px;}
 .btn-head{background:var(--gradient);color:#000;font-weight:800;border:none;padding:7px 14px;border-radius:18px;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:6px;}
-.filter-chips{display:flex;gap:8px;overflow-x:auto;padding:10px 18px;scrollbar-width:none;border-bottom:1px solid rgba(0,255,102,0.05);}.filter-chips::-webkit-scrollbar{display:none;}
-.chip{background:var(--card);border:1px solid var(--border);color:#fff;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:700;white-space:nowrap;cursor:pointer;}.chip.active,.chip:hover{background:var(--primary);color:#000;border-color:var(--primary);}
-#genreFilterWrap{background:rgba(0,255,102,0.04);border:1px dashed var(--border);margin:0 18px 10px 18px;padding:10px;border-radius:10px;}
-.slider{display:flex;gap:15px;overflow-x:auto;padding:12px 18px;scroll-snap-type:x mandatory;scrollbar-width:none;}.slider::-webkit-scrollbar{display:none;}
-.slide-card{flex:0 0 280px;height:160px;border-radius:14px;overflow:hidden;position:relative;border:1px solid var(--border);cursor:pointer;scroll-snap-align:start;}.slide-card img{width:100%;height:100%;object-fit:cover;}.slide-overlay{position:absolute;inset:0;background:linear-gradient(to top,#05080c 20%,transparent 80%);display:flex;flex-direction:column;justify-content:flex-end;padding:12px;}.slide-title{font-size:14px;font-weight:bold;}.slide-tag{font-size:10px;color:var(--primary);font-weight:800;text-transform:uppercase;}
+.filter-chips{display:flex;gap:8px;overflow-x:auto;padding:10px 18px;scrollbar-width:none;border-bottom:1px solid rgba(0,255,102,0.05);}
+.filter-chips::-webkit-scrollbar{display:none;}
+.chip{background:var(--card);border:1px solid var(--border);color:#fff;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:700;white-space:nowrap;cursor:pointer;transition:0.2s;}
+.chip.active,.chip:hover{background:var(--primary);color:#000;border-color:var(--primary);}
+.genre-filter-wrap{background:var(--card);border:1px solid var(--border);border-radius:12px;margin:10px 18px;padding:12px;display:none;}
+.genre-filter-wrap.open{display:block;}
+.genre-filter-wrap input{width:100%;padding:8px 12px;background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:8px;color:#fff;font-size:12px;margin-bottom:10px;}
+.genre-chips{display:flex;flex-wrap:wrap;gap:6px;}
+.slider{display:flex;gap:15px;overflow-x:auto;padding:12px 18px;scroll-snap-type:x mandatory;scrollbar-width:none;}
+.slider::-webkit-scrollbar{display:none;}
+.slide-card{flex:0 0 280px;height:160px;border-radius:14px;overflow:hidden;position:relative;border:1px solid var(--border);cursor:pointer;scroll-snap-align:start;}
+.slide-card img{width:100%;height:100%;object-fit:cover;}
+.slide-overlay{position:absolute;inset:0;background:linear-gradient(to top,#05080c 20%,transparent 80%);display:flex;flex-direction:column;justify-content:flex-end;padding:12px;}
+.slide-title{font-size:14px;font-weight:bold;}
+.slide-tag{font-size:10px;color:var(--primary);font-weight:800;text-transform:uppercase;}
 .section-head{padding:8px 18px;font-size:16px;font-weight:800;display:flex;justify-content:space-between;align-items:center;}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:14px;padding:0 18px 20px 18px;}
-.card{background:var(--card);border-radius:12px;overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:0.2s;position:relative;display:flex;flex-direction:column;}.poster-wrap{width:100%;aspect-ratio:2/3;background:#0c1410;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;text-align:center;}.poster-wrap img{width:100%;height:100%;object-fit:cover;}.no-img-text{padding:10px;font-size:12px;font-weight:bold;color:var(--primary);}.category-badge{position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.75);border:1px solid var(--border);color:var(--primary);font-size:9px;font-weight:800;padding:2px 6px;border-radius:4px;}.card-meta{padding:8px;font-size:12px;}.card-title{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.card-sub{font-size:10px;color:var(--text-muted);margin-top:2px;}
-.detail-view{display:none;padding:18px;max-width:900px;margin:auto;}.detail-view.active{display:block;}.back-btn{background:none;border:1px solid var(--border);color:var(--primary);padding:6px 14px;border-radius:20px;font-size:12px;font-weight:bold;cursor:pointer;margin-bottom:14px;}
-.detail-meta-box{display:flex;gap:16px;margin-bottom:18px;}.detail-meta-box img{width:110px;aspect-ratio:2/3;object-fit:cover;border-radius:8px;border:1px solid var(--border);}.detail-info h2{font-size:18px;color:var(--primary);margin-bottom:6px;}.detail-info p{font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:4px;}
-.player-box{width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;overflow:visible;border:1px solid var(--border);margin-bottom:10px;display:none;position:relative;}.player-box iframe{width:100%;height:100%;border:none;border-radius:12px;}
-.player-controls{display:flex;gap:8px;overflow-x:auto;margin-bottom:16px;}.pctrl-btn{background:var(--card);border:1px solid var(--border);color:#fff;padding:8px 14px;border-radius:20px;font-size:11px;font-weight:800;white-space:nowrap;cursor:pointer;}.pctrl-btn.primary{background:var(--gradient);color:#000;}
-.ep-list{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:14px;}.ep-btn{background:rgba(0,255,102,0.06);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;font-weight:bold;cursor:pointer;margin:4px;}.ep-btn:hover,.ep-btn.active{background:var(--primary);color:#000;}
-.app-bar{position:fixed;bottom:0;left:0;right:0;height:60px;background:rgba(13,18,28,0.95);backdrop-filter:blur(15px);border-top:1px solid var(--border);display:flex;justify-content:space-around;align-items:center;z-index:100;}.nav-item{display:flex;flex-direction:column;align-items:center;gap:4px;color:var(--text-muted);font-size:10px;font-weight:700;text-decoration:none;cursor:pointer;}.nav-item i{font-size:18px;}.nav-item.active{color:var(--primary);}
-.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:1001;display:none;justify-content:center;align-items:center;padding:18px;}.modal-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px;width:100%;max-width:480px;max-height:85vh;overflow-y:auto;position:relative;}.modal-card h3{margin-bottom:12px;color:var(--primary);font-size:18px;}.form-group{margin-bottom:12px;}.form-group label{display:block;font-size:11px;font-weight:bold;color:var(--text-muted);margin-bottom:4px;}.form-control{width:100%;padding:9px 12px;background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:8px;color:#fff;font-size:12px;outline:none;}.btn-action{width:100%;padding:11px;background:var(--gradient);color:#000;font-weight:800;border:none;border-radius:8px;cursor:pointer;margin-top:6px;}
+.card{background:var(--card);border-radius:12px;overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:0.2s;position:relative;display:flex;flex-direction:column;}
+.card:active{transform:scale(0.97);}
+.poster-wrap{width:100%;aspect-ratio:2/3;background:#0c1410;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;text-align:center;}
+.poster-wrap img{width:100%;height:100%;object-fit:cover;}
+.no-img-text{padding:10px;font-size:12px;font-weight:bold;color:var(--primary);text-transform:uppercase;}
+.category-badge{position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.75);border:1px solid var(--border);color:var(--primary);font-size:9px;font-weight:800;padding:2px 6px;border-radius:4px;}
+.card-meta{padding:8px;font-size:12px;}
+.card-title{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.card-sub{font-size:10px;color:var(--text-muted);margin-top:2px;}
+.detail-view{display:none;padding:18px;max-width:900px;margin:auto;}
+.detail-view.active{display:block;}
+.back-btn{background:none;border:1px solid var(--border);color:var(--primary);padding:6px 14px;border-radius:20px;font-size:12px;font-weight:bold;cursor:pointer;margin-bottom:14px;}
+.detail-meta-box{display:flex;gap:16px;margin-bottom:18px;}
+.detail-meta-box img{width:110px;aspect-ratio:2/3;object-fit:cover;border-radius:8px;border:1px solid var(--border);}
+.detail-info h2{font-size:18px;color:var(--primary);margin-bottom:6px;}
+.detail-info p{font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:4px;}
+.detail-socials{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
+.detail-socials a{font-size:11px;padding:5px 10px;border-radius:20px;border:1px solid var(--border);color:#fff;text-decoration:none;font-weight:700;}
+.detail-socials a.tg{background:var(--primary);color:#000;}
+.player-box{width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;overflow:visible;border:1px solid var(--border);margin-bottom:10px;display:none;transition:0.3s;position:relative;}
+.player-box.theater{aspect-ratio:16/10;max-height:70vh;}
+.player-box.full{position:fixed;inset:0;z-index:9999;aspect-ratio:auto;width:100vw;height:100vh;border-radius:0;}
+.player-box.floating-pip{position:fixed;bottom:80px;right:12px;width:200px;aspect-ratio:16/9;z-index:500;box-shadow:0 6px 24px rgba(0,0,0,0.7);border-radius:8px;}
+.player-menu-btn{position:absolute;top:8px;right:8px;z-index:20;background:rgba(0,0,0,0.55);border:none;color:#fff;width:32px;height:32px;border-radius:50%;font-size:15px;cursor:pointer;align-items:center;justify-content:center;}
+.player-menu{position:absolute;top:44px;right:8px;z-index:21;background:rgba(15,20,15,0.97);border:1px solid var(--border);border-radius:10px;padding:6px;display:none;min-width:150px;}
+.player-menu.open{display:block;}
+.player-menu-item{padding:9px 12px;font-size:12px;color:#fff;cursor:pointer;border-radius:6px;display:flex;align-items:center;gap:8px;}
+.player-menu-item:hover{background:rgba(0,255,102,0.12);color:var(--primary);}
+.player-box iframe{width:100%;height:100%;border:none;border-radius:12px;}
+.player-controls{display:flex;gap:8px;overflow-x:auto;margin-bottom:16px;scrollbar-width:none;}
+.player-controls::-webkit-scrollbar{display:none;}
+.pctrl-btn{background:var(--card);border:1px solid var(--border);color:#fff;padding:8px 14px;border-radius:20px;font-size:11px;font-weight:800;white-space:nowrap;cursor:pointer;}
+.pctrl-btn.primary{background:var(--gradient);color:#000;}
+.pctrl-btn:hover{background:var(--primary);color:#000;}
+.ep-list{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:14px;}
+.ep-btn{background:rgba(0,255,102,0.06);border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;font-weight:bold;cursor:pointer;margin:4px;}
+.ep-btn:hover,.ep-btn.active{background:var(--primary);color:#000;}
+.app-bar{position:fixed;bottom:0;left:0;right:0;height:60px;background:rgba(13,18,28,0.95);backdrop-filter:blur(15px);border-top:1px solid var(--border);display:flex;justify-content:space-around;align-items:center;z-index:100;}
+.nav-item{display:flex;flex-direction:column;align-items:center;gap:4px;color:var(--text-muted);font-size:10px;font-weight:700;text-decoration:none;cursor:pointer;}
+.nav-item i{font-size:18px;}
+.nav-item.active{color:var(--primary);}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:1001;display:none;justify-content:center;align-items:center;padding:18px;}
+.modal-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px;width:100%;max-width:480px;max-height:85vh;overflow-y:auto;position:relative;}
+.modal-card h3{margin-bottom:12px;color:var(--primary);font-size:18px;}
+.form-group{margin-bottom:12px;}
+.form-group label{display:block;font-size:11px;font-weight:bold;color:var(--text-muted);margin-bottom:4px;}
+.form-control{width:100%;padding:9px 12px;background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:8px;color:#fff;font-size:12px;outline:none;}
+.form-control:focus{border-color:var(--primary);}
+.btn-action{width:100%;padding:11px;background:var(--gradient);color:#000;font-weight:800;border:none;border-radius:8px;cursor:pointer;margin-top:6px;}
 .toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#111e16;border:1px solid var(--primary);color:#fff;padding:8px 18px;border-radius:30px;font-size:12px;font-weight:bold;z-index:2000;display:none;}
 .ad-banner-container{text-align:center;margin:15px auto;max-width:100%;overflow:hidden;display:flex;justify-content:center;}
 </style>
@@ -419,278 +773,597 @@ ${adBody}
 <div class="toast" id="toast"></div>
 <header>
 <div class="brand" onclick="goHome()">ASI Animes</div>
-<div class="search-box"><i class="fa-solid fa-magnifying-glass"></i><input type="text" id="searchInp" placeholder="Search anime..." oninput="onSearchInput()"></div>
+<div class="search-box"><i class="fa-solid fa-magnifying-glass"></i><input type="text" id="searchInp" placeholder="Search anime, dramas, movie..." oninput="onSearchInput()"></div>
 <button class="btn-head" onclick="openAdmin()"><i class="fa-solid fa-gear"></i> Admin</button>
 </header>
 <div class="filter-chips" id="catChips"></div>
-<div id="genreFilterWrap" style="display:none;">
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
-<input type="text" id="genreSearchInp" class="form-control" placeholder="Search genre: Action, Adventure..." style="max-width:220px;padding:6px 10px;font-size:11px;" oninput="filterGenreChips()">
-<span style="font-size:11px;color:var(--text-muted);">in <b id="currentCatLabel" style="color:var(--primary)"></b></span>
+<div class="genre-filter-wrap" id="genreFilterWrap">
+<input type="text" id="genreSearchInp" placeholder="Search Genre..." oninput="onGenreSearch()">
+<div class="genre-chips" id="genreChips"></div>
 </div>
-<div id="genreChips" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+<div id="catalogView">
+<div class="slider" id="featuredSlider"></div>
+${adBanner ? `<div class="ad-banner-container">${adBanner}</div>` : ''}
+<div class="section-head"><span id="gridTitle">🔥 Latest Updates</span></div>
+<div class="grid" id="mainGrid"></div>
 </div>
-<div id="catalogView"><div class="slider" id="featuredSlider"></div>${adBanner? `<div class="ad-banner-container">${adBanner}</div>` : ''}<div class="section-head"><span id="gridTitle">🔥 Latest Updates</span></div><div class="grid" id="mainGrid"></div></div>
 <div class="detail-view" id="detailView">
 <button class="back-btn" onclick="goHome()"><i class="fa-solid fa-arrow-left"></i> Back to Catalog</button>
 <div class="detail-meta-box" id="detailMeta"></div>
-<div class="player-box" id="playerBox"></div>
-<div class="player-controls" id="playerControls" style="display:none;"><button class="pctrl-btn" onclick="prevEp()">⬅️ Back</button><button class="pctrl-btn primary" onclick="nextEp()">Next ➡️</button></div>
+${adBanner ? `<div class="ad-banner-container">${adBanner}</div>` : ''}
+<div class="player-box" id="playerBox">
+<button class="player-menu-btn" id="playerMenuBtn" onclick="togglePlayerMenu()" style="display:none;"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+<div class="player-menu" id="playerMenu">
+<div class="player-menu-item" onclick="toggleTheater(); togglePlayerMenu();"><i class="fa-solid fa-film"></i> Small / Big</div>
+<div class="player-menu-item" onclick="togglePiP(); togglePlayerMenu();"><i class="fa-solid fa-tv"></i> PiP Popup</div>
+<div class="player-menu-item" onclick="toggleFullscreen(); togglePlayerMenu();"><i class="fa-solid fa-expand"></i> Fullscreen</div>
+</div>
+</div>
+<div class="player-controls" id="playerControls" style="display:none;">
+<button class="pctrl-btn" onclick="prevEp()">⬅️ Back</button>
+<button class="pctrl-btn primary" onclick="nextEp()">Next Episode ➡️</button>
+</div>
 <div class="ep-list" id="epListContainer"></div>
 </div>
 <div class="app-bar">
 <div class="nav-item active" onclick="goHome()"><i class="fa-solid fa-house"></i>Home</div>
-<div class="nav-item" onclick="openVIPModal()"><i class="fa-solid fa-gem"></i>VIP</div>
-<div class="nav-item" onclick="openDecryptModal()"><i class="fa-solid fa-key"></i>Key</div>
+<div class="nav-item" onclick="openVIPModal()"><i class="fa-solid fa-gem"></i>VIP Pass</div>
+<div class="nav-item" onclick="openDecryptModal()"><i class="fa-solid fa-key"></i>Unlock Key</div>
+<div class="nav-item" onclick="openAZModal()"><i class="fa-solid fa-arrow-down-a-z"></i>A-Z</div>
 <a id="tgLink" href="#" target="_blank" class="nav-item"><i class="fa-brands fa-telegram"></i>Telegram</a>
-<a id="instaLink" href="#" target="_blank" class="nav-item"><i class="fa-brands fa-instagram"></i>Insta</a>
-<a id="ytLink" href="#" target="_blank" class="nav-item"><i class="fa-brands fa-youtube"></i>YouTube</a>
-${apkLink? `<a href="${apkLink}" target="_blank" class="nav-item" style="color:var(--accent);"><i class="fa-brands fa-android"></i>App</a>` : ''}
+<a id="instaLink" href="#" target="_blank" class="nav-item" style="display:none;"><i class="fa-brands fa-instagram"></i>Instagram</a>
+<a id="ytLink" href="#" target="_blank" class="nav-item" style="display:none;"><i class="fa-brands fa-youtube"></i>YouTube</a>
+${apkLink ? `<a href="${apkLink}" target="_blank" class="nav-item" style="color:var(--accent);"><i class="fa-brands fa-android"></i>App</a>` : ''}
 </div>
-<div class="modal-overlay" id="genreModal"><div class="modal-card"><span onclick="closeModal('genreModal')" style="position:absolute;right:15px;top:12px;cursor:pointer;">✕</span><h3>Browse by Genre</h3><div id="genreModalList" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;"></div></div></div>
+
+<div class="modal-overlay" id="genreModal">
+<div class="modal-card">
+<span onclick="closeModal('genreModal')" style="position:absolute; right:15px; top:12px; cursor:pointer; font-size:18px;">✕</span>
+<h3><i class="fa-solid fa-masks-theater"></i> Browse by Genre</h3>
+<div id="genreModalList" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:10px;"></div>
+</div>
+</div>
+
 <div class="modal-overlay" id="adminModal">
 <div class="modal-card">
-<span onclick="closeModal('adminModal')" style="position:absolute;right:15px;top:12px;cursor:pointer;font-size:18px;">✕</span>
+<span onclick="closeModal('adminModal')" style="position:absolute; right:15px; top:12px; cursor:pointer; font-size:18px;">✕</span>
 <h3>Admin Control Center</h3>
-<div id="adminLock"><div class="form-group"><label>Admin PIN Passcode</label><input type="password" id="adminPinInp" class="form-control" placeholder="Default PIN: Admin@Secure2025!"></div><button class="btn-action" onclick="verifyAdmin()">Unlock Control Center</button></div>
-<div id="adminBody" style="display:none;">
-<div style="display:flex;gap:4px;margin-bottom:14px;overflow-x:auto;flex-wrap:wrap;">
-<button class="ep-btn active" onclick="setAdminTab('post')">Add Post</button><button class="ep-btn" onclick="setAdminTab('ep')">Episodes</button><button class="ep-btn" style="background:#b380ff;" onclick="setAdminTab('ads')">Ads & App</button><button class="ep-btn" onclick="setAdminTab('del')">Delete Posts</button><button class="ep-btn" onclick="setAdminTab('short')">Shorteners</button><button class="ep-btn" onclick="setAdminTab('vip')">VIP Passes</button><button class="ep-btn" onclick="setAdminTab('paid')">Decrypt Keys</button><button class="ep-btn" onclick="setAdminTab('cfg')">Settings</button>
+<div id="adminLock">
+<div class="form-group"><label>Admin PIN Passcode</label><input type="password" id="adminPinInp" class="form-control" placeholder="Default PIN: Admin@Secure2025!"></div>
+<button class="btn-action" onclick="verifyAdmin()">Unlock Control Center</button>
 </div>
+<div id="adminBody" style="display:none;">
+<div style="display:flex; gap:4px; margin-bottom:14px; overflow-x:auto; flex-wrap:wrap;">
+<button class="ep-btn active" onclick="setAdminTab('post')">Add Post</button>
+<button class="ep-btn" onclick="setAdminTab('ep')">Episodes</button>
+<button class="ep-btn" style="background:#b380ff;" onclick="setAdminTab('ads')">Ads & App</button>
+<button class="ep-btn" onclick="setAdminTab('del')">Delete Posts</button>
+<button class="ep-btn" onclick="setAdminTab('short')">Shorteners</button>
+<button class="ep-btn" onclick="setAdminTab('vip')">VIP Passes</button>
+<button class="ep-btn" onclick="setAdminTab('paid')">Decrypt Keys</button>
+<button class="ep-btn" onclick="setAdminTab('cfg')">Settings</button>
+</div>
+
 <div id="tabPost">
-<div class="form-group" style="background: rgba(0,255,102,0.04); padding:10px; border-radius:8px; border:1px dashed var(--border);"><label style="color:var(--primary);">Auto Fill Parser</label><textarea id="autoDetectInp" class="form-control" style="height:80px;font-size:11px;" placeholder="Name: Naruto..." oninput="handleAutoDetect()"></textarea></div>
-<div class="form-group"><label>Poster Image (Telegram CDN)</label><div style="display:flex;gap:6px;"><input type="file" id="pImgFile" class="form-control" accept="image/*"></div><input type="text" id="pImgUrl" class="form-control" placeholder="OR Direct Image URL" style="margin-top:6px;"></div>
+<div class="form-group" style="background: rgba(0,255,102,0.04); padding:10px; border-radius:8px; border:1px dashed var(--border);">
+<label style="color:var(--primary);"><i class="fa-solid fa-wand-magic-sparkles"></i> Auto Post Fill Parser</label>
+<textarea id="autoDetectInp" class="form-control" style="height:80px; font-size:11px;" placeholder="Paste raw text details (Name: Naruto, Season: 1...)" oninput="handleAutoDetect()"></textarea>
+</div>
+<div class="form-group">
+<label>Poster Image (Telegram CDN)</label>
+<div style="display:flex; gap:6px;"><input type="file" id="pImgFile" class="form-control" accept="image/*"><span style="font-size:10px;color:var(--text-muted);margin-top:8px">File select karo, direct Telegram pe jayega</span></div>
+<input type="text" id="pImgUrl" class="form-control" placeholder="OR Direct Image URL (external)" style="margin-top:6px;">
+</div>
 <div class="form-group"><label>Post/Anime Name</label><input type="text" id="pName" class="form-control" required placeholder="e.g. Solo Leveling"></div>
-<div class="form-group"><label>Category Group (Select)</label><select id="pCategorySelect" class="form-control" onchange="onCategorySelectChange()"><option value="">-- Select Category --</option><option value="Hindi Sub Anime">Hindi Sub Anime</option><option value="Hindi Dub Anime">Hindi Dub Anime</option><option value="K-Drama Hindi Sub">K-Drama Hindi Sub</option><option value="K-Drama Hindi Dub">K-Drama Hindi Dub</option><option value="Movie Hindi Sub">Movie Hindi Sub</option><option value="Movie Hindi Dub">Movie Hindi Dub</option><option value="Uncategorized">Uncategorized</option><option value="__custom__">Custom (type below)</option></select><input type="text" id="pCategory" class="form-control" placeholder="e.g. Hindi Subbed Anime" required style="margin-top:6px;"></div>
-<div class="form-group"><label>Genres (comma)</label><input type="text" id="pGenre" class="form-control" placeholder="Action, Adventure"></div>
+
+<div class="form-group">
+<label>Category Group</label>
+<select id="pCategorySelect" class="form-control" onchange="onCategorySelectChange()">
+<option value="">-- Select Category --</option>
+<option value="Hindi Sub Anime">Hindi Sub Anime</option>
+<option value="Hindi Dub Anime">Hindi Dub Anime</option>
+<option value="K-Drama Hindi Sub">K-Drama Hindi Sub</option>
+<option value="K-Drama Hindi Dub">K-Drama Hindi Dub</option>
+<option value="Movie Hindi Sub">Movie Hindi Sub</option>
+<option value="Movie Hindi Dub">Movie Hindi Dub</option>
+<option value="Uncategorized">Uncategorized</option>
+<option value="Custom">Custom</option>
+</select>
+<input type="text" id="pCategoryCustom" class="form-control" placeholder="Custom category type karo" style="display:none;margin-top:6px;">
+<input type="hidden" id="pCategory">
+</div>
+
+<div class="form-group"><label>Genres (comma se separate karo)</label><input type="text" id="pGenre" class="form-control" placeholder="Action, Dark Fantasy, Adventure"></div>
 <div class="form-group"><label>Release Year</label><input type="text" id="pRelease" class="form-control" placeholder="2025"></div>
 <button class="btn-action" onclick="savePost()">Publish Post</button>
 </div>
+
 <div id="tabEp" style="display:none;">
-<div class="form-group"><label>Search Anime (by name)</label><input type="text" id="epPostSearch" class="form-control" placeholder="Type to filter..." oninput="filterEpPostSelect()"></div>
+<div class="form-group"><label>Search Anime by Name</label><input type="text" id="epPostSearch" class="form-control" placeholder="Type to filter posts..." oninput="filterEpPostDropdown()"></div>
 <div class="form-group"><label>Target Anime Post</label><select id="epPostSelect" class="form-control" onchange="loadAdminEpisodes()"></select></div>
-<div class="form-group"><label>Season / Movie Name</label><input type="text" id="epSeason" class="form-control"></div>
-<div class="form-group"><label>Episode Label</label><input type="text" id="epNum" class="form-control"></div>
-<div class="form-group"><label>Quality</label><select id="epQuality" class="form-control"><option value="SD">SD</option><option value="HD" selected>HD</option><option value="FHD">FHD</option></select></div>
-<div class="form-group"><label>Player Embed Link</label><input type="text" id="epPlayLink" class="form-control"></div>
-<div class="form-group"><label>Download Link</label><input type="text" id="epDlLink" class="form-control"></div>
+<div class="form-group"><label>Season Number (anime ke liye) ya Movie Name</label><input type="text" id="epSeason" class="form-control" placeholder="e.g. 01  ya  Demon Slayer: Mugen Train"></div>
+<div class="form-group"><label>Episode Label</label><input type="text" id="epNum" class="form-control" placeholder="e.g. 01, Full Pack"></div>
+<div class="form-group"><label>Quality Resolution</label><select id="epQuality" class="form-control"><option value="SD">SD</option><option value="HD" selected>HD</option><option value="FHD">FHD</option></select></div>
+<div class="form-group"><label>Player Embed Link</label><input type="text" id="epPlayLink" class="form-control" placeholder="https://streamwish.to/e/..."></div>
+<div class="form-group"><label>Download Target Link</label><input type="text" id="epDlLink" class="form-control" placeholder="https://drive.google.com/..."></div>
 <button class="btn-action" onclick="saveEpisode()">Save Episode</button>
-<div id="epAdminList" style="margin-top:12px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:5px;"></div>
+<div id="epAdminList" style="margin-top:12px; max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; padding:5px;"></div>
 </div>
-<div id="tabAds" style="display:none;"><div class="form-group"><label>Header Code</label><textarea id="cfgAdHead" class="form-control" style="height:60px;"></textarea></div><div class="form-group"><label>Body Code</label><textarea id="cfgAdBody" class="form-control" style="height:60px;"></textarea></div><div class="form-group"><label>Banner Code</label><textarea id="cfgAdBanner" class="form-control" style="height:60px;"></textarea></div><div class="form-group"><label>APK Link</label><input type="text" id="cfgApkLink" class="form-control"></div><button class="btn-action" onclick="saveAdsSettings()">Save Ads & App Links</button></div>
-<div id="tabVip" style="display:none;"><div class="form-group"><label>Email</label><input type="email" id="vipEmail" class="form-control"></div><div class="form-group"><label>Key</label><input type="text" id="vipKey" class="form-control"></div><div class="form-group"><label>Days</label><select id="vipDays" class="form-control"><option value="1">1 Day</option><option value="7">7 Days</option><option value="30" selected>30 Days</option><option value="365">1 Year</option></select></div><button class="btn-action" onclick="saveVipUser()">Activate VIP</button><div id="vipList" style="margin-top:10px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:5px;"></div></div>
-<div id="tabDel" style="display:none;"><h4 style="color:#ff4d4d;margin-bottom:10px;">Delete Anime Posts</h4><div id="deleteList" style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:5px;"></div></div>
-<div id="tabShort" style="display:none;"><div class="form-group"><label>Shortener Domain</label><input type="text" id="cfgShDom" class="form-control"></div><div class="form-group"><label>API Key</label><input type="text" id="cfgShKey" class="form-control"></div><button class="btn-action" onclick="addShortener()">Add Shortener</button><div id="shortList" style="margin-top:12px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:5px;"></div></div>
-<div id="tabPaid" style="display:none;"><div class="form-group"><label>Decrypt Password</label><input type="text" id="paidPass" class="form-control"></div><div class="form-group"><label>Original Link</label><input type="text" id="paidUrl" class="form-control"></div><button class="btn-action" onclick="addPaidRequest()">Add Key</button><div id="paidList" style="margin-top:12px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:5px;"></div></div>
+
+<div id="tabAds" style="display:none;">
+<p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">Paste Ad codes here</p>
+<div class="form-group"><label>Header Code</label><textarea id="cfgAdHead" class="form-control" style="height:60px;"></textarea></div>
+<div class="form-group"><label>Body Code</label><textarea id="cfgAdBody" class="form-control" style="height:60px;"></textarea></div>
+<div class="form-group"><label>Banner Ad Code</label><textarea id="cfgAdBanner" class="form-control" style="height:60px;"></textarea></div>
+<div class="form-group"><label>App / APK Download Link</label><input type="text" id="cfgApkLink" class="form-control"></div>
+<button class="btn-action" onclick="saveAdsSettings()">Save Ads & App Links</button>
+</div>
+
+<div id="tabVip" style="display:none;">
+<div class="form-group"><label>Customer Gmail Address</label><input type="email" id="vipEmail" class="form-control" placeholder="user@gmail.com"></div>
+<div class="form-group"><label>Set Access Key Passcode</label><input type="text" id="vipKey" class="form-control" placeholder="PASS99"></div>
+<div class="form-group"><label>Select Duration</label><select id="vipDays" class="form-control"><option value="1">1 Day Pass</option><option value="7">7 Days Pass</option><option value="30" selected>30 Days (1 Month)</option><option value="365">1 Year VIP</option></select></div>
+<button class="btn-action" onclick="saveVipUser()">Activate VIP Pass</button>
+<h4 style="margin-top:15px; color:#ff4d4d;">Delete VIP Users</h4>
+<div id="vipList" style="max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; padding:5px;"></div>
+</div>
+
+<div id="tabDel" style="display:none;">
+<h4 style="color:#ff4d4d; margin-bottom:10px;">Delete Anime Posts</h4>
+<div id="deleteList" style="max-height:300px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; padding:5px;"></div>
+</div>
+
+<div id="tabShort" style="display:none;">
+<p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">STRICT MODE: Users must solve shortener. Original link is hidden.</p>
+<div class="form-group"><label>Shortener Domain</label><input type="text" id="cfgShDom" class="form-control" placeholder="gplinks.com ya api.gplinks.com"></div>
+<div class="form-group"><label>API Key</label><input type="text" id="cfgShKey" class="form-control"></div>
+<button class="btn-action" onclick="addShortener()">Add Shortener</button>
+<div id="shortList" style="margin-top:12px; max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; padding:5px;"></div>
+</div>
+
+<div id="tabPaid" style="display:none;">
+<div class="form-group"><label>Decrypt Password</label><input type="text" id="paidPass" class="form-control"></div>
+<div class="form-group"><label>Original Link</label><input type="text" id="paidUrl" class="form-control"></div>
+<button class="btn-action" onclick="addPaidRequest()">Add Decrypt Key</button>
+<div id="paidList" style="margin-top:12px; max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; padding:5px;"></div>
+</div>
+
 <div id="tabCfg" style="display:none;">
-<div class="form-group"><label>Bot Token</label><div style="display:flex;gap:6px;"><input type="text" id="cfgBotToken" class="form-control"><button type="button" class="pctrl-btn" onclick="clearSettingField('bot_token')">🗑 Clear</button></div></div>
-<div class="form-group"><label>Chat ID</label><div style="display:flex;gap:6px;"><input type="text" id="cfgChatId" class="form-control"><button type="button" class="pctrl-btn" onclick="clearSettingField('chat_id')">🗑 Clear</button></div></div>
-<div class="form-group"><label>Telegram Public Link (Channel)</label><div style="display:flex;gap:6px;"><input type="text" id="cfgTg" class="form-control"><button type="button" class="pctrl-btn" onclick="clearSettingField('channel_link')">🗑 Clear</button></div></div>
-<div class="form-group"><label>Group Link</label><div style="display:flex;gap:6px;"><input type="text" id="cfgGroupLink" class="form-control"><button type="button" class="pctrl-btn" onclick="clearSettingField('group_link')">🗑 Clear</button></div></div>
-<div class="form-group"><label>Website Link</label><div style="display:flex;gap:6px;"><input type="text" id="cfgSiteLink" class="form-control"><button type="button" class="pctrl-btn" onclick="clearSettingField('site_link')">🗑 Clear</button></div></div>
-<div class="form-group"><label>Instagram Link</label><div style="display:flex;gap:6px;"><input type="text" id="cfgInstaLink" class="form-control" placeholder="https://instagram.com/..."><button type="button" class="pctrl-btn" onclick="clearSettingField('instagram_link')">🗑 Clear</button></div></div>
-<div class="form-group"><label>YouTube Link</label><div style="display:flex;gap:6px;"><input type="text" id="cfgYtLink" class="form-control" placeholder="https://youtube.com/..."><button type="button" class="pctrl-btn" onclick="clearSettingField('youtube_link')">🗑 Clear</button></div></div>
-<div class="form-group"><label>Admin PIN</label><div style="display:flex;gap:6px;"><input type="text" id="cfgPin" class="form-control"><button type="button" class="pctrl-btn" onclick="clearSettingField('admin_pin')">🗑 Reset</button></div></div>
+<p style="font-size:11px; color:var(--text-muted); margin-bottom:10px;">Blank chhod kar save karoge to purana value SAFE rahega.</p>
+<div class="form-group"><label>Telegram Bot Token</label><div style="display:flex; gap:6px;"><input type="text" id="cfgBotToken" class="form-control" placeholder="123456:ABC-DEF..." autocomplete="off"><button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('bot_token')">🗑 Clear</button></div></div>
+<div class="form-group"><label>Telegram Private Channel ID</label><div style="display:flex; gap:6px;"><input type="text" id="cfgChatId" class="form-control" placeholder="-100xxxxxxxxxx" autocomplete="off"><button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('chat_id')">🗑 Clear</button></div></div>
+<div class="form-group"><label>Telegram Public Link</label><div style="display:flex; gap:6px;"><input type="text" id="cfgTg" class="form-control" placeholder="https://t.me/yourchannel"><button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('channel_link')">🗑 Clear</button></div></div>
+<div class="form-group"><label>Group Link ( @ ya full link )</label><div style="display:flex; gap:6px;"><input type="text" id="cfgGroupLink" class="form-control" placeholder="https://t.me/hindisubanime_q"><button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('group_link')">🗑 Clear</button></div></div>
+<div class="form-group"><label>Website Link</label><div style="display:flex; gap:6px;"><input type="text" id="cfgSiteLink" class="form-control" placeholder="https://yourdomain.com"><button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('site_link')">🗑 Clear</button></div></div>
+<div class="form-group"><label>Instagram Link</label><div style="display:flex; gap:6px;"><input type="text" id="cfgInstaLink" class="form-control" placeholder="https://instagram.com/yourpage"><button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('instagram_link')">🗑 Clear</button></div></div>
+<div class="form-group"><label>YouTube Link</label><div style="display:flex; gap:6px;"><input type="text" id="cfgYtLink" class="form-control" placeholder="https://youtube.com/@yourchannel"><button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('youtube_link')">🗑 Clear</button></div></div>
+<div class="form-group"><label>Admin Access PIN</label><div style="display:flex; gap:6px;"><input type="text" id="cfgPin" class="form-control" placeholder="Admin@Secure2025!" autocomplete="off"><button type="button" class="pctrl-btn" style="flex:0 0 auto;" onclick="clearSettingField('admin_pin')">🗑 Reset</button></div></div>
 <button class="btn-action" onclick="saveSettings()">Save Global Config</button>
 </div>
 </div>
 </div>
 </div>
+
 <script>
-let appData={posts:[],settings:{},shorteners:[],paid_requests:[],allGenres:[]};
-let currentPost=null;let currentCategory='ALL';let currentGenre='ALL';let sessionPin="";let currentEpisodeList=[];let currentEpIndex=-1;
-let currentPage=1;let hasMorePosts=true;let isFetching=false;let searchTimer=null;
-window.onload=async()=>{ await loadData(1,false); const urlParams=new URLSearchParams(window.location.search); const deepId=urlParams.get('id'); if(deepId) await openDetail(deepId); };
-async function loadData(page=1,append=false){
- if(isFetching) return; isFetching=true;
- try{
-  const q=encodeURIComponent(document.getElementById('searchInp').value.trim());
-  const res=await fetch(\`/api/data?page=\${page}&limit=30&search=\${q}&cat=\${encodeURIComponent(currentCategory)}&gen=\${encodeURIComponent(currentGenre)}\`);
-  const data=await res.json();
-  appData.settings=data.settings; hasMorePosts=data.hasMore; currentPage=page;
-  if(page===1){
-   appData.posts=data.posts;
-   if(!append && q==="" && currentCategory==='ALL' && currentGenre==='ALL'){ renderCatChips(data.cats||[]); appData.allGenres=data.genres||[]; }
-   renderSlider(appData.posts.slice(0,5)); document.getElementById('mainGrid').innerHTML='';
-  }else{ appData.posts=appData.posts.concat(data.posts); }
-  renderGrid(data.posts,append);
-  if(currentCategory!=='ALL'){ renderGenreChips(data.genres||[]); }
-  document.getElementById('tgLink').href=appData.settings?.channel_link||'#';
-  document.getElementById('instaLink').href=appData.settings?.instagram_link||'#';
-  document.getElementById('ytLink').href=appData.settings?.youtube_link||'#';
- }catch(e){ showToast('Offline'); }
- isFetching=false;
+let appData = { posts: [], settings: {}, shorteners: [], paid_requests: [], allGenres: [], cats: [] };
+let currentPost = null;
+let currentCategory = 'ALL';
+let currentGenre = 'ALL';
+let sessionPin = "";
+let currentEpisodeList = [];
+let currentEpIndex = -1;
+let currentPage = 1;
+let hasMorePosts = true;
+let isFetching = false;
+let searchTimer = null;
+let filteredEpPosts = [];
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js'); });
 }
-window.addEventListener('scroll',()=>{ if(document.getElementById('catalogView').style.display!=='none'){ if((window.innerHeight+window.scrollY)>=document.body.offsetHeight-500){ if(hasMorePosts&&!isFetching){ loadData(currentPage+1,true); } } } });
-function onSearchInput(){ clearTimeout(searchTimer); searchTimer=setTimeout(()=>{ loadData(1,false); },500); }
-async function adminFetch(url,options={}){ options.headers={'Content-Type':'application/json','X-Admin-Pin':sessionPin}; return fetch(url,options); }
-function renderCatChips(cats){
- const bar=document.getElementById('catChips');
- bar.innerHTML=\`<div class="chip" style="background:var(--accent);color:#000;" onclick="openGenreModal()"><i class="fa-solid fa-masks-theater"></i> Genres</div>\`+\`<div class="chip \${currentCategory==='ALL'?'active':''}" onclick="filterByCat('ALL')">All Categories</div>\`+cats.map(c=>\`<div class="chip \${currentCategory===c?'active':''}" onclick="filterByCat('\${c}')">\${c}</div>\`).join('');
+
+window.onload = async () => {
+  await loadData(1, false);
+  const urlParams = new URLSearchParams(window.location.search);
+  const deepId = urlParams.get('id');
+  if (deepId) await openDetail(deepId);
+};
+
+async function loadData(page = 1, append = false) {
+  if (isFetching) return;
+  isFetching = true;
+  try {
+    const q = encodeURIComponent(document.getElementById('searchInp').value.trim());
+    const res = await fetch(\`/api/data?page=\${page}&limit=30&search=\${q}&cat=\${encodeURIComponent(currentCategory)}&gen=\${encodeURIComponent(currentGenre)}\`);
+    const data = await res.json();
+    if (data.error) { showToast(data.error); isFetching=false; return; }
+    appData.settings = data.settings;
+    appData.cats = data.cats || [];
+    hasMorePosts = data.hasMore;
+    currentPage = page;
+
+    if (page === 1) {
+      appData.posts = data.posts;
+      if (q === "" && currentCategory === 'ALL' && currentGenre === 'ALL') {
+        renderCatChips(data.cats || []);
+        appData.allGenres = data.genres || [];
+      } else if (currentCategory !== 'ALL') {
+        appData.allGenres = data.genres || [];
+        renderGenreChipsFiltered();
+      }
+      renderSlider(appData.posts.slice(0, 5));
+      document.getElementById('mainGrid').innerHTML = '';
+    } else {
+      appData.posts = appData.posts.concat(data.posts);
+    }
+    renderGrid(data.posts, append);
+    updateSocialLinks();
+  } catch (e) { showToast('Offline / Network Error'); }
+  isFetching = false;
 }
-function renderGenreChips(genres){
- const wrap=document.getElementById('genreFilterWrap'); const container=document.getElementById('genreChips'); const label=document.getElementById('currentCatLabel');
- if(!genres||genres.length===0){ wrap.style.display='none'; return; }
- wrap.style.display='block'; label.innerText=currentCategory;
- container.innerHTML=\`<div class="chip \${currentGenre==='ALL'?'active':''}" data-genre="ALL" onclick="filterByGenre('ALL')">All Anime</div>\`+genres.map(g=>\`<div class="chip \${currentGenre===g?'active':''}" data-genre="\${g}" onclick="filterByGenre('\${g.replace(/'/g,"\\\\'")}')">\${g}</div>\`).join('');
+
+window.addEventListener('scroll', () => {
+  if (document.getElementById('catalogView').style.display !== 'none') {
+    if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+      if (hasMorePosts && !isFetching) loadData(currentPage + 1, true);
+    }
+  }
+});
+
+function onSearchInput() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { loadData(1, false); }, 500);
 }
-function filterGenreChips(){
- const q=document.getElementById('genreSearchInp').value.toLowerCase();
- document.querySelectorAll('#genreChips.chip').forEach(ch=>{ const g=(ch.dataset.genre||'').toLowerCase(); if(g==='all'){ ch.style.display=''; return; } ch.style.display=g.includes(q)?'':'none'; });
+
+function updateSocialLinks() {
+  const s = appData.settings || {};
+  document.getElementById('tgLink').href = s.channel_link || '#';
+  const insta = document.getElementById('instaLink');
+  const yt = document.getElementById('ytLink');
+  if (s.instagram_link) { insta.href = s.instagram_link; insta.style.display = 'flex'; } else { insta.style.display = 'none'; }
+  if (s.youtube_link) { yt.href = s.youtube_link; yt.style.display = 'flex'; } else { yt.style.display = 'none'; }
 }
-function filterByCat(cat){
- currentCategory=cat; currentGenre='ALL';
- document.querySelectorAll('#catChips.chip').forEach(c=>c.classList.remove('active')); if(event&&event.target) event.target.classList.add('active');
- if(cat==='ALL'){ document.getElementById('genreFilterWrap').style.display='none'; document.getElementById('gridTitle').innerText='🔥 Latest Updates'; }
- else{ document.getElementById('gridTitle').innerText='📂 '+cat; }
- loadData(1,false);
+
+async function adminFetch(url, options = {}) {
+  options.headers = { 'Content-Type': 'application/json', 'X-Admin-Pin': sessionPin };
+  return fetch(url, options);
 }
-function filterByGenre(gen){
- currentGenre=gen;
- document.querySelectorAll('#genreChips.chip').forEach(c=>c.classList.remove('active')); if(event&&event.target) event.target.classList.add('active');
- document.getElementById('gridTitle').innerText= gen==='ALL'? '📂 '+currentCategory : '📂 '+currentCategory+' - '+gen;
- loadData(1,false);
+
+function renderCatChips(cats) {
+  const bar = document.getElementById('catChips');
+  bar.innerHTML = \`<div class="chip" style="background:var(--accent); color:#000; border-color:var(--accent);" onclick="openGenreModal()"><i class="fa-solid fa-masks-theater"></i> Genres</div>\` +
+    \`<div class="chip \${currentCategory==='ALL'?'active':''}" onclick="filterByCat('ALL')">All Categories</div>\` +
+    cats.map(c => \`<div class="chip \${currentCategory===c?'active':''}" onclick="filterByCat('\${c.replace(/'/g,"\\'")}')">\${c}</div>\`).join('');
 }
-function openGenreModal(){
- const list=document.getElementById('genreModalList'); const genres=appData.allGenres.sort();
- if(genres.length===0){ list.innerHTML='<p style="color:var(--text-muted);font-size:12px;">No genres</p>'; }
- else{ list.innerHTML=genres.map(g=>\`<div class="chip" onclick="selectGlobalGenre('\${g}')" style="margin:4px;">\${g}</div>\`).join(''); }
- document.getElementById('genreModal').style.display='flex';
+
+function filterByCat(cat) {
+  currentCategory = cat;
+  currentGenre = 'ALL';
+  const chips = document.getElementById('catChips').querySelectorAll('.chip');
+  chips.forEach(c => c.classList.remove('active'));
+  if (event && event.target) event.target.classList.add('active');
+  document.getElementById('gridTitle').innerText = cat === 'ALL' ? '🔥 Latest Updates' : '📂 ' + cat;
+  const wrap = document.getElementById('genreFilterWrap');
+  if (cat === 'ALL') { wrap.classList.remove('open'); } else { wrap.classList.add('open'); document.getElementById('genreSearchInp').value=''; }
+  loadData(1, false);
 }
-function selectGlobalGenre(g){ closeModal('genreModal'); currentCategory='ALL'; currentGenre=g; document.getElementById('gridTitle').innerText='🎭 Genre: '+g; loadData(1,false); }
-function renderGrid(posts,append=false){
- const grid=document.getElementById('mainGrid');
- if(!append && (!posts||posts.length===0)){ grid.innerHTML='<p style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:30px;">No anime found.</p>'; return; }
- const html=posts.map(p=>\`
-  <div class="card" onclick="openDetail('\${p.id}')">
-   <div class="poster-wrap">\${p.image_url? \`<img src="\${p.image_url}" loading="lazy" alt="\${p.name}">\` : \`<div class="no-img-text">\${p.name}</div>\`}<span class="category-badge">\${p.category||'Anime'}</span></div>
-   <div class="card-meta"><div class="card-title">\${p.name}</div><div class="card-sub">\${p.genres||''} \${p.telegram_url? '• <a href="'+p.telegram_url+'" target="_blank" style="color:var(--primary)">TG</a>' : ''}</div></div>
-  </div>\`).join('');
- if(append){ grid.innerHTML+=html; } else{ grid.innerHTML=html; }
+
+function renderGenreChipsFiltered() {
+  const search = (document.getElementById('genreSearchInp').value || '').toLowerCase();
+  const genres = appData.allGenres || [];
+  const filtered = search ? genres.filter(g=>g.toLowerCase().includes(search)) : genres;
+  const container = document.getElementById('genreChips');
+  if (!container) return;
+  if (filtered.length===0) { container.innerHTML='<p style="font-size:11px;color:var(--text-muted);">No genres in this category</p>'; return; }
+  container.innerHTML = filtered.map(g=>\`<div class="chip \${currentGenre===g?'active':''}" onclick="filterByGenre('\${g.replace(/'/g,"\\'")}')">\${g}</div>\`).join('');
 }
-function renderSlider(posts){
- const slider=document.getElementById('featuredSlider');
- if(posts.length===0){ slider.style.display='none'; return; } slider.style.display='flex';
- slider.innerHTML=posts.map(p=>\`<div class="slide-card" onclick="openDetail('\${p.id}')">\${p.image_url? \`<img src="\${p.image_url}">\` : ''}<div class="slide-overlay"><div class="slide-tag">\${p.category||'Featured'}</div><div class="slide-title">\${p.name}</div></div></div>\`).join('');
+
+function onGenreSearch() { renderGenreChipsFiltered(); }
+
+function filterByGenre(gen) {
+  currentGenre = gen;
+  document.getElementById('gridTitle').innerText = '🎭 ' + currentCategory + ' • ' + gen;
+  loadData(1, false);
 }
-async function openDetail(postId){
- currentPost=appData.posts.find(p=>p.id===postId);
- if(!currentPost){ try{ const pRes=await fetch(\`/api/post?id=\${postId}\`); if(pRes.ok) currentPost=await pRes.json(); }catch(e){} if(!currentPost) return showToast("Post not found"); }
- window.history.pushState({id:postId},'',\`/?id=\${postId}\`);
- document.getElementById('catalogView').style.display='none'; document.getElementById('catChips').style.display='none'; document.getElementById('genreFilterWrap').style.display='none';
- document.getElementById('detailView').classList.add('active');
- document.getElementById('detailMeta').innerHTML=\`\${currentPost.image_url? \`<img src="\${currentPost.image_url}">\` : ''}<div class="detail-info"><h2>\${currentPost.name}</h2><p><strong>Category:</strong> \${currentPost.category}</p><p><strong>Genre:</strong> \${currentPost.genres||'N/A'}</p><p><strong>Release:</strong> \${currentPost.release||'N/A'}</p><p><strong>Telegram:</strong> <a href="\${currentPost.telegram_url||'#'}" target="_blank" style="color:var(--primary)">\${currentPost.telegram_url||'Not linked'}</a></p><p style="margin-top:8px;display:flex;gap:8px;"><a href="\${appData.settings?.channel_link||'#'}" target="_blank" style="color:var(--primary)"><i class="fa-brands fa-telegram"></i> Channel</a> \${appData.settings?.group_link?`<a href="\${appData.settings.group_link}" target="_blank" style="color:var(--primary)">Group</a>`:''} \${appData.settings?.instagram_link?`<a href="\${appData.settings.instagram_link}" target="_blank" style="color:#e1306c">Insta</a>`:''} \${appData.settings?.youtube_link?`<a href="\${appData.settings.youtube_link}" target="_blank" style="color:#ff0000">YouTube</a>`:''}</p></div>\`;
- const epRes=await fetch(\`/api/episodes?post_id=\${postId}\`); const epData=await epRes.json(); const list=document.getElementById('epListContainer');
- if(!epData.episodes||epData.episodes.length===0){ list.innerHTML='<h4>Episodes</h4><p style="color:var(--text-muted);font-size:12px;">No episodes yet.</p>'; currentEpisodeList=[]; return; }
- currentEpisodeList=epData.episodes; const QUALITY_ORDER=["FHD","HD","SD"]; const seasonGroups={}; const seasonOrder=[];
- epData.episodes.forEach(e=>{ const key=e.season&&e.season.trim()?e.season.trim():'__none__'; if(!seasonGroups[key]){ seasonGroups[key]={}; seasonOrder.push(key); } const q=e.quality||'HD'; if(!seasonGroups[key][q]) seasonGroups[key][q]=[]; seasonGroups[key][q].push(e); });
- let html='<h4>Episodes List</h4>';
- seasonOrder.forEach(seasonKey=>{ if(seasonKey!=='__none__'){ html+=\`<div style="margin:14px 0 6px;font-weight:800;color:var(--primary);font-size:13px;">Season \${seasonKey}</div>\`; } const qualsPresent=Object.keys(seasonGroups[seasonKey]); const orderedQuals=QUALITY_ORDER.filter(q=>qualsPresent.includes(q)).concat(qualsPresent.filter(q=>!QUALITY_ORDER.includes(q)));
- orderedQuals.forEach(q=>{ html+=\`<div style="margin:8px 0 4px;font-weight:700;color:var(--accent);font-size:11px;">\${q}</div>\`; html+='<div style="margin-bottom:4px;">'+seasonGroups[seasonKey][q].map(e=>\`<button class="ep-btn" data-epid="\${e.id}" onclick="playStream('\${e.play_link}', '\${e.id}')">EP\${e.label}</button><button class="ep-btn" style="background:#00b359;" onclick="downloadEp('\${e.id}')"><i class="fa-solid fa-download"></i></button>\`).join('')+'</div>'; }); });
- list.innerHTML=html; if(epData.episodes[0].play_link){ playStream(epData.episodes[0].play_link, epData.episodes[0].id); }
+
+function openGenreModal() {
+  const list = document.getElementById('genreModalList');
+  const genres = (appData.allGenres||[]).sort();
+  if (genres.length===0) list.innerHTML='<p style="color:var(--text-muted); font-size:12px;">No genres available yet.</p>';
+  else list.innerHTML = genres.map(g=>\`<div class="chip" onclick="selectGlobalGenre('\${g.replace(/'/g,"\\'")}')" style="margin:4px;">\${g}</div>\`).join('');
+  document.getElementById('genreModal').style.display='flex';
 }
-function highlightActiveEpisode(epId){ document.querySelectorAll('#epListContainer.ep-btn').forEach(b=>b.classList.remove('active')); const btn=document.querySelector(\`#epListContainer.ep-btn[data-epid="\${epId}"]\`); if(btn) btn.classList.add('active'); }
-function playStream(url,epId){ const box=document.getElementById('playerBox'); if(url){ box.style.display='block'; const oldFrame=box.querySelector('iframe'); if(oldFrame) oldFrame.remove(); const iframe=document.createElement('iframe'); iframe.src=url; iframe.setAttribute('allowfullscreen',''); iframe.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-popups allow-presentation'); box.appendChild(iframe); document.getElementById('playerControls').style.display='flex'; box.scrollIntoView({behavior:'smooth'}); } currentEpIndex=currentEpisodeList.findIndex(e=>e.id===epId); highlightActiveEpisode(epId); }
-function prevEp(){ if(currentEpIndex>0) playStream(currentEpisodeList[currentEpIndex-1].play_link,currentEpisodeList[currentEpIndex-1].id); else showToast('Pehla episode'); }
-function nextEp(){ if(currentEpIndex!==-1 && currentEpIndex<currentEpisodeList.length-1) playStream(currentEpisodeList[currentEpIndex+1].play_link,currentEpisodeList[currentEpIndex+1].id); else showToast('Last episode'); }
-async function downloadEp(epId){ showToast('Generating Link...'); const key=localStorage.getItem('vip_key')||''; const res=await fetch(\`/api/get-link?post_id=\${currentPost.id}&ep_id=\${epId}&key=\${encodeURIComponent(key)}\`); const data=await res.json(); if(data.url) window.open(data.url,'_blank'); else showToast(data.error||'Busy'); }
-function goHome(){ window.history.pushState({},'', '/'); document.getElementById('catalogView').style.display='block'; document.getElementById('detailView').classList.remove('active'); const box=document.getElementById('playerBox'); const oldFrame=box.querySelector('iframe'); if(oldFrame) oldFrame.remove(); box.style.display='none'; document.getElementById('catChips').style.display='flex'; if(currentCategory!=='ALL') document.getElementById('genreFilterWrap').style.display='block'; window.scrollTo({top:0,behavior:'smooth'}); }
+function selectGlobalGenre(g) {
+  closeModal('genreModal');
+  currentCategory='ALL';
+  currentGenre=g;
+  document.getElementById('genreFilterWrap').classList.remove('open');
+  document.getElementById('gridTitle').innerText='🎭 Genre: '+g;
+  loadData(1,false);
+}
+
+function renderGrid(posts, append=false) {
+  const grid=document.getElementById('mainGrid');
+  if (!append && (!posts||posts.length===0)) { grid.innerHTML='<p style="grid-column:1/-1; text-align:center; color:var(--text-muted); padding:30px;">No anime found.</p>'; return; }
+  const html = posts.map(p=>\`
+    <div class="card" onclick="openDetail('\${p.id}')">
+      <div class="poster-wrap">
+        \${p.image_url ? \`<img src="\${p.image_url}" loading="lazy" alt="\${p.name} Hindi Subbed">\` : \`<div class="no-img-text">\${p.name}</div>\`}
+        <span class="category-badge">\${p.category||'Anime'}</span>
+      </div>
+      <div class="card-meta"><div class="card-title">\${p.name}</div><div class="card-sub">\${p.genres||''}</div></div>
+    </div>
+  \`).join('');
+  if (append) grid.innerHTML+=html; else grid.innerHTML=html;
+}
+
+function renderSlider(posts) {
+  const slider=document.getElementById('featuredSlider');
+  if (!posts||posts.length===0){ slider.style.display='none'; return; }
+  slider.style.display='flex';
+  slider.innerHTML=posts.map(p=>\`
+    <div class="slide-card" onclick="openDetail('\${p.id}')">
+      \${p.image_url ? \`<img src="\${p.image_url}" alt="\${p.name} Hindi Subbed">\` : ''}
+      <div class="slide-overlay"><div class="slide-tag">\${p.category||'Featured'}</div><div class="slide-title">\${p.name}</div></div>
+    </div>
+  \`).join('');
+}
+
+async function openDetail(postId) {
+  currentPost = appData.posts.find(p=>p.id===postId);
+  if (!currentPost) {
+    try { const pRes=await fetch(\`/api/post?id=\${postId}\`); if(pRes.ok) currentPost=await pRes.json(); } catch(e){}
+    if (!currentPost) return showToast("Post not found");
+  }
+  window.history.pushState({id:postId},'','/?id='+postId);
+  document.getElementById('catalogView').style.display='none';
+  document.getElementById('catChips').style.display='none';
+  document.getElementById('genreFilterWrap').classList.remove('open');
+  document.getElementById('detailView').classList.add('active');
+  const s=appData.settings||{};
+  let socialHtml = '';
+  if (s.channel_link) socialHtml+=\`<a href="\${s.channel_link}" target="_blank" class="tg"><i class="fa-brands fa-telegram"></i> Channel</a>\`;
+  if (s.group_link) socialHtml+=\`<a href="\${s.group_link}" target="_blank"><i class="fa-solid fa-users"></i> Group</a>\`;
+  if (s.instagram_link) socialHtml+=\`<a href="\${s.instagram_link}" target="_blank"><i class="fa-brands fa-instagram"></i> Instagram</a>\`;
+  if (s.youtube_link) socialHtml+=\`<a href="\${s.youtube_link}" target="_blank"><i class="fa-brands fa-youtube"></i> YouTube</a>\`;
+  if (s.site_link) socialHtml+=\`<a href="\${s.site_link}" target="_blank"><i class="fa-solid fa-globe"></i> Website</a>\`;
+  document.getElementById('detailMeta').innerHTML=\`
+    \${currentPost.image_url ? \`<img src="\${currentPost.image_url}" alt="\${currentPost.name} Hindi Subbed">\` : ''}
+    <div class="detail-info">
+      <h2>\${currentPost.name}</h2>
+      <p><strong>Category:</strong> \${currentPost.category}</p>
+      <p><strong>Genre:</strong> \${currentPost.genres||'N/A'}</p>
+      <p><strong>Release:</strong> \${currentPost.release||'N/A'}</p>
+      <p><strong>Telegram:</strong> <a href="\${currentPost.telegram_url||'#'}" target="_blank" style="color:var(--primary)">\${currentPost.telegram_url||'Not linked'}</a></p>
+      <div class="detail-socials">\${socialHtml}</div>
+    </div>\`;
+
+  const epRes=await fetch(\`/api/episodes?post_id=\${postId}\`);
+  const epData=await epRes.json();
+  const list=document.getElementById('epListContainer');
+  if (!epData.episodes||epData.episodes.length===0){ list.innerHTML='<h4>Episodes</h4><p style="color:var(--text-muted); font-size:12px;">No episodes uploaded yet.</p>'; currentEpisodeList=[]; return; }
+  currentEpisodeList=epData.episodes;
+  const QUALITY_ORDER=["FHD","HD","SD"];
+  const seasonGroups={}; const seasonOrder=[];
+  epData.episodes.forEach(e=>{ const key=e.season&&e.season.trim()?e.season.trim():'__none__'; if(!seasonGroups[key]){seasonGroups[key]={}; seasonOrder.push(key);} const q=e.quality||'HD'; if(!seasonGroups[key][q])seasonGroups[key][q]=[]; seasonGroups[key][q].push(e); });
+  let html='<h4>Episodes List</h4>';
+  seasonOrder.forEach(seasonKey=>{ if(seasonKey!=='__none__'){ html+=\`<div style="margin:14px 0 6px; font-weight:800; color:var(--primary); font-size:13px;"><i class="fa-solid fa-layer-group"></i> Season \${seasonKey}</div>\`; } const qualsPresent=Object.keys(seasonGroups[seasonKey]); const orderedQuals=QUALITY_ORDER.filter(q=>qualsPresent.includes(q)).concat(qualsPresent.filter(q=>!QUALITY_ORDER.includes(q))); orderedQuals.forEach(q=>{ html+=\`<div style="margin:8px 0 4px; font-weight:700; color:var(--accent); font-size:11px; letter-spacing:1px;">\${q}</div>\`; html+='<div style="margin-bottom:4px;">'+seasonGroups[seasonKey][q].map(e=>\`<button class="ep-btn" data-epid="\${e.id}" onclick="playStream('\${e.play_link}', '\${e.id}')">EP\${e.label}</button><button class="ep-btn" style="background:#00b359;" onclick="downloadEp('\${e.id}')"><i class="fa-solid fa-download"></i></button>\`).join('')+'</div>'; }); });
+  list.innerHTML=html;
+  if (epData.episodes[0].play_link) playStream(epData.episodes[0].play_link, epData.episodes[0].id);
+}
+
+function highlightActiveEpisode(epId){ document.querySelectorAll('#epListContainer .ep-btn').forEach(b=>b.classList.remove('active')); const btn=document.querySelector(\`#epListContainer .ep-btn[data-epid="\${epId}"]\`); if(btn)btn.classList.add('active'); }
+function playStream(url, epId){ const box=document.getElementById('playerBox'); if(url){ box.style.display='block'; const oldFrame=box.querySelector('iframe'); if(oldFrame)oldFrame.remove(); const iframe=document.createElement('iframe'); iframe.src=url; iframe.setAttribute('allowfullscreen',''); iframe.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-popups allow-presentation'); box.appendChild(iframe); document.getElementById('playerMenuBtn').style.display='flex'; document.getElementById('playerControls').style.display='flex'; box.scrollIntoView({behavior:'smooth'}); } currentEpIndex=currentEpisodeList.findIndex(e=>e.id===epId); highlightActiveEpisode(epId); }
+function togglePlayerMenu(){ document.getElementById('playerMenu').classList.toggle('open'); }
+function prevEp(){ if(currentEpIndex>0)playStream(currentEpisodeList[currentEpIndex-1].play_link, currentEpisodeList[currentEpIndex-1].id); else showToast('Ye pehla episode hai'); }
+function nextEp(){ if(currentEpIndex!==-1 && currentEpIndex<currentEpisodeList.length-1)playStream(currentEpisodeList[currentEpIndex+1].play_link, currentEpisodeList[currentEpIndex+1].id); else showToast('Ye last episode hai'); }
+function toggleTheater(){ document.getElementById('playerBox').classList.toggle('theater'); }
+function togglePiP(){ document.getElementById('playerBox').classList.toggle('floating-pip'); }
+function toggleFullscreen(){ const box=document.getElementById('playerBox'); if(!document.fullscreenElement){ (box.requestFullscreen||box.webkitRequestFullscreen||box.msRequestFullscreen||function(){}).call(box); } else { (document.exitFullscreen||function(){}).call(document); } }
+async function downloadEp(epId){ showToast('Generating Secure Link...'); const key=localStorage.getItem('vip_key')||''; const res=await fetch(\`/api/get-link?post_id=\${currentPost.id}&ep_id=\${epId}&key=\${encodeURIComponent(key)}\`); const data=await res.json(); if(data.url)window.open(data.url,'_blank'); else showToast(data.error||'Server is busy, try again'); }
+function goHome(){ window.history.pushState({},'','/'); document.getElementById('catalogView').style.display='block'; document.getElementById('detailView').classList.remove('active'); const box=document.getElementById('playerBox'); const oldFrame=box.querySelector('iframe'); if(oldFrame)oldFrame.remove(); box.classList.remove('theater','floating-pip'); box.style.display='none'; if(document.getElementById('playerMenuBtn'))document.getElementById('playerMenuBtn').style.display='none'; if(document.getElementById('playerMenu'))document.getElementById('playerMenu').classList.remove('open'); document.getElementById('catChips').style.display='flex'; window.scrollTo({top:0,behavior:'smooth'}); }
+
 function handleAutoDetect(){
- const text=document.getElementById("autoDetectInp").value.trim(); if(!text) return;
- const lines=text.split(/\\n/); let currentField=null; let parsed={name:"",category:"",release:"",genres:""}; const SEP="[ \\t]*[-:=_,.]+[ \\t]*"; const aliases=[["name","name"],["title","name"],["category","category"],["cat","category"],["release","release"],["date","release"],["year","release"],["genres","genres"],["genre","genres"]];
- lines.forEach(line=>{ let matched=false; for(const [alias,field] of aliases){ const m=line.match(new RegExp("^[ \\t]*"+alias.replace(/ /g,"[ \\t]+")+SEP+"(.*)","i")); if(m){ currentField=field; parsed[field]=(parsed[field]?parsed[field]+"\\n":"")+m[1].trim(); matched=true; break; } } if(!matched&&currentField&&line.trim()) parsed[currentField]+="\\n"+line.trim(); });
- if(parsed.name) document.getElementById("pName").value=parsed.name.trim();
- if(parsed.category){ document.getElementById("pCategory").value=parsed.category.trim(); document.getElementById("pCategorySelect").value=""; }
- if(parsed.genres) document.getElementById("pGenre").value=parsed.genres.trim();
- if(parsed.release) document.getElementById("pRelease").value=parsed.release.trim();
+  const text=document.getElementById("autoDetectInp").value.trim(); if(!text)return;
+  const lines=text.split('\n');
+  let currentField=null; let parsed={name:"",category:"",release:"",genres:""};
+  const SEP="[ \\t]*[-:=_,.]+[ \\t]*";
+  const aliases=[["name","name"],["title","name"],["naam","name"],["category","category"],["cat","category"],["release date","release"],["release","release"],["date","release"],["year","release"],["genres","genres"],["genre","genres"]];
+  lines.forEach(line=>{ let matched=false; for(const [alias,field] of aliases){ const m=line.match(new RegExp("^[ \\t]*"+alias.replace(/ /g,"[ \\t]+")+SEP+"(.*)","i")); if(m){ currentField=field; parsed[field]=(parsed[field]?parsed[field]+"\n":"")+m[1].trim(); matched=true; break; } } if(!matched&&currentField&&line.trim()) parsed[currentField]+="\n"+line.trim(); });
+  if(parsed.name)document.getElementById("pName").value=parsed.name.trim();
+  if(parsed.category){
+    const catVal=parsed.category.trim();
+    const sel=document.getElementById("pCategorySelect");
+    const opts=Array.from(sel.options).map(o=>o.value);
+    if(opts.includes(catVal)){ sel.value=catVal; document.getElementById("pCategoryCustom").style.display='none'; document.getElementById("pCategory").value=catVal; }
+    else { sel.value='Custom'; document.getElementById("pCategoryCustom").style.display='block'; document.getElementById("pCategoryCustom").value=catVal; document.getElementById("pCategory").value=catVal; }
+  }
+  if(parsed.genres)document.getElementById("pGenre").value=parsed.genres.trim();
+  if(parsed.release)document.getElementById("pRelease").value=parsed.release.trim();
 }
-function onCategorySelectChange(){ const sel=document.getElementById('pCategorySelect').value; const inp=document.getElementById('pCategory'); if(sel==='__custom__'){ inp.value=''; inp.focus(); } else if(sel){ inp.value=sel; } }
+
+function onCategorySelectChange(){
+  const sel=document.getElementById("pCategorySelect");
+  const customInp=document.getElementById("pCategoryCustom");
+  const hidden=document.getElementById("pCategory");
+  if(sel.value==='Custom'){ customInp.style.display='block'; hidden.value=customInp.value||''; customInp.focus(); }
+  else { customInp.style.display='none'; hidden.value=sel.value; }
+}
+document.addEventListener('DOMContentLoaded',()=>{ const ci=document.getElementById("pCategoryCustom"); if(ci){ ci.addEventListener('input',()=>{ document.getElementById("pCategory").value=ci.value; }); } });
+
 function openAdmin(){ document.getElementById('adminModal').style.display='flex'; }
 function closeModal(id){ document.getElementById(id).style.display='none'; }
+
 async function verifyAdmin(){
- const pin=document.getElementById('adminPinInp').value; if(!pin) return alert('Enter PIN!'); sessionPin=pin;
- const checkRes=await fetch('/api/data',{headers:{'X-Admin-Pin':sessionPin}});
- if(checkRes.status===429){ sessionPin=""; return alert('Blocked 15 min'); }
- const data=await checkRes.json(); if(!data.admin){ sessionPin=""; return alert('Galat PIN!'); }
- appData=data; document.getElementById('adminLock').style.display='none'; document.getElementById('adminBody').style.display='block'; loadAdminDataUI();
+  const pin=document.getElementById('adminPinInp').value; if(!pin)return alert('Enter PIN!'); sessionPin=pin;
+  const checkRes=await fetch('/api/data',{headers:{'X-Admin-Pin':sessionPin}});
+  if(checkRes.status===429){ sessionPin=""; return alert('❌ Too many attempts. You have been temporarily blocked for 15 minutes.'); }
+  const data=await checkRes.json();
+  if(!data.admin){ sessionPin=""; return alert('❌ Galat PIN! Dobara try karo.'); }
+  appData=data; filteredEpPosts=data.posts||[];
+  document.getElementById('adminLock').style.display='none';
+  document.getElementById('adminBody').style.display='block';
+  loadAdminDataUI();
 }
-function setAdminTab(tab){ ['Post','Ep','Del','Short','Vip','Paid','Cfg','Ads'].forEach(t=>{ const el=document.getElementById('tab'+t); if(el) el.style.display='none'; }); const activeEl=document.getElementById('tab'+tab.charAt(0).toUpperCase()+tab.slice(1)); if(activeEl) activeEl.style.display='block'; }
-function filterEpPostSelect(){
- const q=document.getElementById('epPostSearch').value.toLowerCase();
- const sel=document.getElementById('epPostSelect');
- const filtered=appData.posts.filter(p=>p.name.toLowerCase().includes(q));
- sel.innerHTML='<option value="">-- Select Anime --</option>'+filtered.map(p=>\`<option value="\${p.id}">\${p.name}</option>\`).join('');
+function setAdminTab(tab){
+  ['Post','Ep','Del','Short','Vip','Paid','Cfg','Ads'].forEach(t=>{ const el=document.getElementById('tab'+t); if(el)el.style.display='none'; });
+  const activeEl=document.getElementById('tab'+tab.charAt(0).toUpperCase()+tab.slice(1));
+  if(activeEl)activeEl.style.display='block';
 }
+
+function renderEpPostOptions(posts){
+  const sel=document.getElementById('epPostSelect');
+  sel.innerHTML='<option value="">-- Select Anime --</option>'+posts.map(p=>\`<option value="\${p.id}">\${p.name}</option>\`).join('');
+}
+
+function filterEpPostDropdown(){
+  const q=(document.getElementById('epPostSearch').value||'').toLowerCase();
+  const source = appData.posts || [];
+  filteredEpPosts = q ? source.filter(p=>p.name.toLowerCase().includes(q)) : source;
+  renderEpPostOptions(filteredEpPosts);
+}
+
 async function loadAdminDataUI(){
- const sel=document.getElementById('epPostSelect');
- sel.innerHTML='<option value="">-- Select Anime --</option>'+appData.posts.map(p=>\`<option value="\${p.id}">\${p.name}</option>\`).join('');
- const delList=document.getElementById('deleteList');
- delList.innerHTML=appData.posts.map(p=>\`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.2);margin-bottom:4px;border-radius:6px;"><span style="font-size:12px;color:#fff;word-break:break-all;">\${p.name}</span><button style="background:#ff4d4d;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;font-weight:bold;cursor:pointer;" onclick="deletePost('\${p.id}')">Delete</button></div>\`).join('');
- document.getElementById('cfgBotToken').value=""; document.getElementById('cfgChatId').value="";
- document.getElementById('cfgTg').value=appData.settings?.channel_link||''; document.getElementById('cfgGroupLink').value=appData.settings?.group_link||'';
- document.getElementById('cfgSiteLink').value=appData.settings?.site_link||''; document.getElementById('cfgInstaLink').value=appData.settings?.instagram_link||''; document.getElementById('cfgYtLink').value=appData.settings?.youtube_link||''; document.getElementById('cfgPin').value="";
- document.getElementById('cfgAdHead').value=appData.settings?.ad_head||''; document.getElementById('cfgAdBody').value=appData.settings?.ad_body||''; document.getElementById('cfgAdBanner').value=appData.settings?.ad_banner||''; document.getElementById('cfgApkLink').value=appData.settings?.apk_link||'';
- try{
-  const vipRes=await adminFetch('/api/admin/vip'); const vipData=await vipRes.json();
-  document.getElementById('vipList').innerHTML=(vipData.users||[]).map(u=>\`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.2);margin-bottom:4px;border-radius:6px;"><span style="font-size:12px;color:#fff;">\${u.email}</span><button style="background:#ff4d4d;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;" onclick="deleteVipUser('\${encodeURIComponent(u.email)}')">Delete</button></div>\`).join('');
- }catch(e){}
- document.getElementById('shortList').innerHTML=(appData.shorteners||[]).map((s,i)=>\`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.2);margin-bottom:4px;border-radius:6px;"><span style="font-size:12px;color:#fff;">\${s.domain}</span><button style="background:#ff4d4d;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;" onclick="deleteShortener(\${i})">Delete</button></div>\`).join('');
- document.getElementById('paidList').innerHTML=(appData.paid_requests||[]).map((k,i)=>\`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.2);margin-bottom:4px;border-radius:6px;"><span style="font-size:12px;color:#fff;">\${k.password}</span><button style="background:#ff4d4d;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;" onclick="deletePaidKey(\${i})">Delete</button></div>\`).join('');
+  filteredEpPosts=appData.posts||[];
+  renderEpPostOptions(filteredEpPosts);
+  const delList=document.getElementById('deleteList');
+  delList.innerHTML=appData.posts.map(p=>\`
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid var(--border); background:rgba(0,0,0,0.2); margin-bottom:4px; border-radius:6px;">
+      <span style="font-size:12px; color:#fff; word-break:break-all;">\${p.name}</span>
+      <button style="background:#ff4d4d; color:#fff; border:none; padding:5px 10px; border-radius:4px; font-size:11px; font-weight:bold; cursor:pointer;" onclick="deletePost('\${p.id}')">Delete</button>
+    </div>
+  \`).join('');
+
+  document.getElementById('cfgBotToken').value="";
+  document.getElementById('cfgChatId').value="";
+  document.getElementById('cfgTg').value=appData.settings?.channel_link||'';
+  document.getElementById('cfgGroupLink').value=appData.settings?.group_link||'';
+  document.getElementById('cfgSiteLink').value=appData.settings?.site_link||'';
+  document.getElementById('cfgInstaLink').value=appData.settings?.instagram_link||'';
+  document.getElementById('cfgYtLink').value=appData.settings?.youtube_link||'';
+  document.getElementById('cfgPin').value="";
+  document.getElementById('cfgAdHead').value=appData.settings?.ad_head||'';
+  document.getElementById('cfgAdBody').value=appData.settings?.ad_body||'';
+  document.getElementById('cfgAdBanner').value=appData.settings?.ad_banner||'';
+  document.getElementById('cfgApkLink').value=appData.settings?.apk_link||'';
+
+  try{
+    const vipRes=await adminFetch('/api/admin/vip');
+    const vipData=await vipRes.json();
+    const vipList=document.getElementById('vipList');
+    vipList.innerHTML=(vipData.users||[]).map(u=>\`
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid var(--border); background:rgba(0,0,0,0.2); margin-bottom:4px; border-radius:6px;">
+        <span style="font-size:12px; color:#fff; word-break:break-all;">\${u.email}</span>
+        <button style="background:#ff4d4d; color:#fff; border:none; padding:5px 10px; border-radius:4px; font-size:11px; font-weight:bold; cursor:pointer;" onclick="deleteVipUser('\${encodeURIComponent(u.email)}')">Delete</button>
+      </div>
+    \`).join('');
+  }catch(err){}
+  const shortList=document.getElementById('shortList');
+  shortList.innerHTML=(appData.shorteners||[]).map((s,i)=>\`
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid var(--border); background:rgba(0,0,0,0.2); margin-bottom:4px; border-radius:6px;">
+      <span style="font-size:12px; color:#fff; word-break:break-all;">\${s.domain}</span>
+      <button style="background:#ff4d4d; color:#fff; border:none; padding:5px 10px; border-radius:4px; font-size:11px; font-weight:bold; cursor:pointer;" onclick="deleteShortener(\${i})">Delete</button>
+    </div>
+  \`).join('');
+  const paidList=document.getElementById('paidList');
+  paidList.innerHTML=(appData.paid_requests||[]).map((k,i)=>\`
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid var(--border); background:rgba(0,0,0,0.2); margin-bottom:4px; border-radius:6px;">
+      <span style="font-size:12px; color:#fff; word-break:break-all;">\${k.password}</span>
+      <button style="background:#ff4d4d; color:#fff; border:none; padding:5px 10px; border-radius:4px; font-size:11px; font-weight:bold; cursor:pointer;" onclick="deletePaidKey(\${i})">Delete</button>
+    </div>
+  \`).join('');
 }
+
 async function loadAdminEpisodes(){
- const postId=document.getElementById('epPostSelect').value; const epList=document.getElementById('epAdminList');
- if(!postId){ epList.innerHTML=''; return; }
- const res=await fetch(\`/api/episodes?post_id=\${postId}\`); const data=await res.json();
- epList.innerHTML=data.episodes.map(e=>\`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--border);background:rgba(0,0,0,0.2);margin-bottom:4px;border-radius:6px;"><span style="font-size:12px;color:#fff;">\${e.season? '['+e.season+'] ':''}Ep \${e.label} - \${e.quality}</span><button style="background:#ff4d4d;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;" onclick="deleteEpisode('\${e.id}','\${postId}')">Delete</button></div>\`).join('');
+  const postId=document.getElementById('epPostSelect').value;
+  const epList=document.getElementById('epAdminList');
+  if(!postId){ epList.innerHTML=''; return; }
+  const res=await fetch(\`/api/episodes?post_id=\${postId}\`);
+  const data=await res.json();
+  epList.innerHTML=data.episodes.map(e=>\`
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid var(--border); background:rgba(0,0,0,0.2); margin-bottom:4px; border-radius:6px;">
+      <span style="font-size:12px; color:#fff; word-break:break-all;">\${e.season ? '['+e.season+'] ' : ''}Ep \${e.label} - \${e.quality}</span>
+      <button style="background:#ff4d4d; color:#fff; border:none; padding:5px 10px; border-radius:4px; font-size:11px; font-weight:bold; cursor:pointer;" onclick="deleteEpisode('\${e.id}', '\${postId}')">Delete</button>
+    </div>
+  \`).join('');
 }
-async function deletePost(id){ if(!confirm("Delete post + episodes?")) return; const res=await adminFetch(\`/api/posts/\${id}\`,{method:'DELETE'}); if(res.ok){ showToast('Deleted!'); await verifyAdmin(); } }
-async function deleteEpisode(epId,postId){ if(!confirm("Delete episode?")) return; const res=await adminFetch(\`/api/episodes/\${epId}?post_id=\${postId}\`,{method:'DELETE'}); if(res.ok){ showToast('Episode Deleted!'); loadAdminEpisodes(); } }
-async function deleteVipUser(emailParam){ if(!confirm("Delete VIP?")) return; const res=await adminFetch(\`/api/admin/vip/\${emailParam}\`,{method:'DELETE'}); if(res.ok){ showToast('VIP Deleted!'); loadAdminDataUI(); } }
-async function addShortener(){ const domain=document.getElementById('cfgShDom').value.trim(); const api_key=document.getElementById('cfgShKey').value.trim(); if(!domain||!api_key) return alert("Fill both"); let shorteners=appData.shorteners||[]; shorteners.push({domain,api_key}); const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({shorteners})}); if(res.ok){ showToast('Added!'); verifyAdmin(); } }
-async function deleteShortener(index){ if(!confirm("Delete?")) return; let shorteners=appData.shorteners||[]; shorteners.splice(index,1); const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({shorteners})}); if(res.ok){ showToast('Deleted!'); verifyAdmin(); } }
-async function addPaidRequest(){ const password=document.getElementById('paidPass').value.trim(); const original_link=document.getElementById('paidUrl').value.trim(); if(!password||!original_link) return alert("Fill both"); let paid_requests=appData.paid_requests||[]; paid_requests.push({password,original_link}); const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({paid_requests})}); if(res.ok){ showToast('Added!'); verifyAdmin(); } }
-async function deletePaidKey(index){ if(!confirm("Delete?")) return; let paid_requests=appData.paid_requests||[]; paid_requests.splice(index,1); const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({paid_requests})}); if(res.ok){ showToast('Deleted!'); verifyAdmin(); } }
-async function clearSettingField(key){ if(!confirm('Clear?')) return; const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({settings:{[key]:""}})}); if(res.ok){ showToast('Cleared!'); const map={bot_token:'cfgBotToken',chat_id:'cfgChatId',channel_link:'cfgTg',group_link:'cfgGroupLink',site_link:'cfgSiteLink',instagram_link:'cfgInstaLink',youtube_link:'cfgYtLink',admin_pin:'cfgPin'}; if(map[key]) document.getElementById(map[key]).value=''; if(key==='admin_pin') sessionPin='Admin@Secure2025!'; verifyAdmin(); } }
+
+async function deletePost(id){ if(!confirm("Delete this post and episodes permanently?"))return; const res=await adminFetch(\`/api/posts/\${id}\`,{method:'DELETE'}); if(res.ok){showToast('Post Deleted!'); await verifyAdmin(); } else alert("Auth failed"); }
+async function deleteEpisode(epId, postId){ if(!confirm("Delete this episode?"))return; const res=await adminFetch(\`/api/episodes/\${epId}?post_id=\${postId}\`,{method:'DELETE'}); if(res.ok){showToast('Episode Deleted!'); loadAdminEpisodes(); } else alert("Auth failed"); }
+async function deleteVipUser(emailParam){ if(!confirm("Delete this VIP User?"))return; const res=await adminFetch(\`/api/admin/vip/\${emailParam}\`,{method:'DELETE'}); if(res.ok){showToast('VIP User Deleted!'); loadAdminDataUI(); } }
+async function addShortener(){ const domain=document.getElementById('cfgShDom').value.trim(); const api_key=document.getElementById('cfgShKey').value.trim(); if(!domain||!api_key)return alert("Fill both fields"); let shorteners=appData.shorteners||[]; shorteners.push({domain, api_key}); const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({shorteners})}); if(res.ok){document.getElementById('cfgShDom').value=''; document.getElementById('cfgShKey').value=''; showToast('Shortener Added!'); verifyAdmin(); } }
+async function deleteShortener(index){ if(!confirm("Delete this shortener?"))return; let shorteners=appData.shorteners||[]; shorteners.splice(index,1); const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({shorteners})}); if(res.ok){showToast('Shortener Deleted!'); verifyAdmin(); } }
+async function addPaidRequest(){ const password=document.getElementById('paidPass').value.trim(); const original_link=document.getElementById('paidUrl').value.trim(); if(!password||!original_link)return alert("Fill both fields"); let paid_requests=appData.paid_requests||[]; paid_requests.push({password, original_link}); const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({paid_requests})}); if(res.ok){document.getElementById('paidPass').value=''; document.getElementById('paidUrl').value=''; showToast('Key Added!'); verifyAdmin(); } }
+async function deletePaidKey(index){ if(!confirm("Delete this key?"))return; let paid_requests=appData.paid_requests||[]; paid_requests.splice(index,1); const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({paid_requests})}); if(res.ok){showToast('Key Deleted!'); verifyAdmin(); } }
+async function clearSettingField(key){ if(!confirm('Ye saved value delete kar do?'))return; const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({settings:{[key]:""}})}); if(res.ok){showToast('Cleared!'); const fieldMap={bot_token:'cfgBotToken',chat_id:'cfgChatId',channel_link:'cfgTg',group_link:'cfgGroupLink',site_link:'cfgSiteLink',instagram_link:'cfgInstaLink',youtube_link:'cfgYtLink',admin_pin:'cfgPin'}; if(fieldMap[key])document.getElementById(fieldMap[key]).value=''; if(key==='admin_pin')sessionPin='Admin@Secure2025!'; verifyAdmin(); } }
 async function saveSettings(){
- const settings={};
- const v=(id)=>document.getElementById(id).value.trim();
- const cl=v('cfgTg'); if(cl) settings.channel_link=cl;
- const gl=v('cfgGroupLink'); if(gl) settings.group_link=gl;
- const sl=v('cfgSiteLink'); if(sl) settings.site_link=sl;
- const il=v('cfgInstaLink'); if(il) settings.instagram_link=il;
- const yl=v('cfgYtLink'); if(yl) settings.youtube_link=yl;
- const bt=v('cfgBotToken'); if(bt) settings.bot_token=bt;
- const ci=v('cfgChatId'); if(ci) settings.chat_id=ci;
- const pin=v('cfgPin'); if(pin) settings.admin_pin=pin;
- const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({settings})}); if(res.ok){ showToast('Saved!'); if(pin) sessionPin=pin; verifyAdmin(); }
+  const channel_link=document.getElementById('cfgTg').value.trim();
+  const group_link=document.getElementById('cfgGroupLink').value.trim();
+  const site_link=document.getElementById('cfgSiteLink').value.trim();
+  const instagram_link=document.getElementById('cfgInstaLink').value.trim();
+  const youtube_link=document.getElementById('cfgYtLink').value.trim();
+  const admin_pin=document.getElementById('cfgPin').value.trim();
+  const bot_token=document.getElementById('cfgBotToken').value.trim();
+  const chat_id=document.getElementById('cfgChatId').value.trim();
+  const settings={channel_link};
+  if(group_link)settings.group_link=group_link;
+  if(site_link)settings.site_link=site_link;
+  if(instagram_link)settings.instagram_link=instagram_link;
+  if(youtube_link)settings.youtube_link=youtube_link;
+  if(admin_pin)settings.admin_pin=admin_pin;
+  if(bot_token)settings.bot_token=bot_token;
+  if(chat_id)settings.chat_id=chat_id;
+  const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({settings})});
+  if(res.ok){showToast('Settings Saved!'); if(admin_pin)sessionPin=admin_pin; verifyAdmin();}
 }
 async function saveAdsSettings(){
- const settings={ ad_head:document.getElementById('cfgAdHead').value, ad_body:document.getElementById('cfgAdBody').value, ad_banner:document.getElementById('cfgAdBanner').value, apk_link:document.getElementById('cfgApkLink').value };
- const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({settings})}); if(res.ok){ showToast('Saved! Reloading...'); setTimeout(()=>location.reload(),1500); }
+  const settings={ad_head:document.getElementById('cfgAdHead').value, ad_body:document.getElementById('cfgAdBody').value, ad_banner:document.getElementById('cfgAdBanner').value, apk_link:document.getElementById('cfgApkLink').value,};
+  const res=await adminFetch('/api/settings',{method:'POST',body:JSON.stringify({settings})});
+  if(res.ok){showToast('Ads & APK Settings Saved! Page reloading...'); setTimeout(()=>location.reload(),1500);}
 }
 async function savePost(){
- const name=document.getElementById('pName').value.trim(); const category=document.getElementById('pCategory').value.trim(); const genres=document.getElementById('pGenre').value.trim(); const release=document.getElementById('pRelease').value.trim(); const image_url=document.getElementById('pImgUrl').value.trim();
- if(!name) return alert('Name required!');
- const fileInput=document.getElementById('pImgFile'); const file=fileInput.files[0];
- if(file){ showToast('Uploading to Telegram...'); const fd=new FormData(); fd.append('file',file); fd.append('name',name); fd.append('category',category); fd.append('genres',genres); fd.append('release',release); fd.append('image_url',image_url); const res=await fetch('/api/posts',{method:'POST',body:fd,headers:{'X-Admin-Pin':sessionPin}}); const data=await res.json(); if(res.ok&&data.success){ showToast('Published!'); document.getElementById('pName').value=''; document.getElementById('pImgUrl').value=''; fileInput.value=''; document.getElementById('pCategory').value=''; await verifyAdmin(); } else{ alert('Failed: '+(data.error||'Auth')); } return; }
- const res=await adminFetch('/api/posts',{method:'POST',body:JSON.stringify({name,image_url,category,genres,release})});
- if(res.ok){ const data=await res.json(); showToast('Published! Link: '+(data.post.telegram_url||'')); document.getElementById('pName').value=''; document.getElementById('pImgUrl').value=''; await verifyAdmin(); } else{ alert("Auth failed"); }
+  const name=document.getElementById('pName').value.trim();
+  const category=document.getElementById('pCategory').value.trim() || document.getElementById('pCategorySelect').value;
+  const genres=document.getElementById('pGenre').value.trim();
+  const release=document.getElementById('pRelease').value.trim();
+  const image_url=document.getElementById('pImgUrl').value.trim();
+  if(!name)return alert('Anime name required!');
+  if(!category)return alert('Category select karo!');
+  const fileInput=document.getElementById('pImgFile');
+  const file=fileInput.files[0];
+  if(file){
+    showToast('Uploading to Telegram CDN...');
+    const fd=new FormData(); fd.append('file',file); fd.append('name',name); fd.append('category',category); fd.append('genres',genres); fd.append('release',release); fd.append('image_url',image_url);
+    const res=await fetch('/api/posts',{method:'POST',body:fd,headers:{'X-Admin-Pin':sessionPin}});
+    const data=await res.json();
+    if(res.ok&&data.success){showToast('Published!'); document.getElementById('pName').value=''; document.getElementById('pImgUrl').value=''; document.getElementById('pImgFile').value=''; await verifyAdmin(); } else {alert('Failed: '+(data.error||'Auth'));}
+    return;
+  }
+  const res=await adminFetch('/api/posts',{method:'POST',body:JSON.stringify({name,image_url,category,genres,release})});
+  if(res.ok){ const data=await res.json(); if(data.telegram&&data.telegram.ok===false){alert('⚠️ Post saved, but failed to send to Telegram.\\nReason: '+data.telegram.reason);} else {showToast('Post Published & Sent to Telegram!');} document.getElementById('pName').value=''; document.getElementById('pImgUrl').value=''; await verifyAdmin(); } else {alert("Auth failed");}
 }
 async function saveEpisode(){
- const post_id=document.getElementById('epPostSelect').value; const season=document.getElementById('epSeason').value.trim(); const label=document.getElementById('epNum').value.trim(); const quality=document.getElementById('epQuality').value; const play_link=document.getElementById('epPlayLink').value.trim(); const download_link=document.getElementById('epDlLink').value.trim();
- if(!post_id||!label) return alert('Select Post and Label');
- const res=await adminFetch('/api/episodes',{method:'POST',body:JSON.stringify({post_id,season,label,quality,play_link,download_link})});
- if(res.ok){ showToast('Episode Saved!'); document.getElementById('epNum').value=''; document.getElementById('epPlayLink').value=''; document.getElementById('epDlLink').value=''; loadAdminEpisodes(); } else alert("Auth failed");
+  const post_id=document.getElementById('epPostSelect').value;
+  const season=document.getElementById('epSeason').value.trim();
+  const label=document.getElementById('epNum').value.trim();
+  const quality=document.getElementById('epQuality').value;
+  const play_link=document.getElementById('epPlayLink').value.trim();
+  const download_link=document.getElementById('epDlLink').value.trim();
+  if(!post_id||!label)return alert('Select Post and enter Episode Label');
+  const res=await adminFetch('/api/episodes',{method:'POST',body:JSON.stringify({post_id,season,label,quality,play_link,download_link})});
+  if(res.ok){showToast('Episode Attached!'); document.getElementById('epNum').value=''; document.getElementById('epPlayLink').value=''; document.getElementById('epDlLink').value=''; loadAdminEpisodes();} else alert("Auth failed");
 }
 async function saveVipUser(){
- const email=document.getElementById('vipEmail').value.trim(); const key=document.getElementById('vipKey').value.trim(); const days=document.getElementById('vipDays').value;
- if(!email||!key) return alert("Fill all");
- const res=await adminFetch('/api/premium',{method:'POST',body:JSON.stringify({email,key,days})});
- if(res.ok){ showToast('VIP Created!'); document.getElementById('vipEmail').value=''; document.getElementById('vipKey').value=''; loadAdminDataUI(); } else alert("Auth failed");
+  const email=document.getElementById('vipEmail').value.trim();
+  const key=document.getElementById('vipKey').value.trim();
+  const days=document.getElementById('vipDays').value;
+  if(!email||!key)return alert("Fill all fields");
+  const res=await adminFetch('/api/premium',{method:'POST',body:JSON.stringify({email,key,days})});
+  if(res.ok){showToast('VIP Pass Created & TG Alert Sent!'); document.getElementById('vipEmail').value=''; document.getElementById('vipKey').value=''; loadAdminDataUI();} else alert("Auth failed");
 }
-function openVIPModal(){ const key=prompt('Enter VIP Key:'); if(key){ localStorage.setItem('vip_key',key); showToast('VIP Active!'); } }
-async function openDecryptModal(){ const code=prompt('Enter Secret Key:'); if(code){ const res=await fetch(\`/api/decrypt-link?code=\${encodeURIComponent(code)}\`); const data=await res.json(); if(data.url) window.open(data.url,'_blank'); else alert('Invalid'); } }
-function openAZModal(){ const letter=prompt('Enter A-Z:'); if(letter){ document.getElementById('searchInp').value=letter.toUpperCase(); onSearchInput(); } }
+function openVIPModal(){ const key=prompt('Enter your VIP Passcode Key:'); if(key){localStorage.setItem('vip_key',key); showToast('VIP Mode Active!');} }
+async function openDecryptModal(){ const code=prompt('Enter Secret Decrypt Key:'); if(code){ const res=await fetch(\`/api/decrypt-link?code=\${encodeURIComponent(code)}\`); const data=await res.json(); if(data.url)window.open(data.url,'_blank'); else alert('Invalid key or expired'); } }
+function openAZModal(){ const letter=prompt('Enter A-Z letter to filter (e.g. N, D, S):'); if(letter){ const l=letter.toUpperCase(); document.getElementById('searchInp').value=l; onSearchInput(); } }
 function showToast(msg){ const t=document.getElementById('toast'); t.innerText=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
 </script>
 </body>

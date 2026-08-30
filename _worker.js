@@ -1019,19 +1019,7 @@ function renderFullAppHTML(settings, post, origin) {
           </div>
           <div class="form-group">
             <label>Category Group</label>
-            <select id="pCategorySelect" class="form-control" onchange="onCategorySelectChange()">
-              <option value="">-- Select Category --</option>
-              <option value="Hindi Sub Anime">Hindi Sub Anime</option>
-              <option value="Hindi Dub Anime">Hindi Dub Anime</option>
-              <option value="K-Drama Hindi Sub">K-Drama Hindi Sub</option>
-              <option value="K-Drama Hindi Dub">K-Drama Hindi Dub</option>
-              <option value="Movie Hindi Sub">Movie Hindi Sub</option>
-              <option value="Movie Hindi Dub">Movie Hindi Dub</option>
-              <option value="Uncategorized">Uncategorized</option>
-              <option value="Custom">Custom</option>
-            </select>
-            <input type="text" id="pCategoryCustom" class="form-control" placeholder="Custom category type karo" style="display:none; margin-top:6px;">
-            <input type="hidden" id="pCategory">
+            <input type="text" id="pCategory" class="form-control" placeholder="e.g. Hindi Subbed Anime" required>
           </div>
           <div class="form-group">
             <label>Genres (comma se separate karo)</label>
@@ -1756,12 +1744,7 @@ function renderFullAppHTML(settings, post, origin) {
 
     async function savePost() {
       const name = document.getElementById('pName').value.trim();
-      let category = document.getElementById('pCategory').value.trim();
-      if (!category) category = document.getElementById('pCategorySelect').value;
-      if (category === 'Custom') {
-        const custom = document.getElementById('pCategoryCustom').value.trim();
-        if (custom) category = custom;
-      }
+      const category = document.getElementById('pCategory').value.trim();
       const genres = document.getElementById('pGenre').value.trim();
       const release = document.getElementById('pRelease').value.trim();
       const image_url = document.getElementById('pImgUrl').value.trim();
